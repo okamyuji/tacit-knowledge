@@ -85,7 +85,7 @@ Exit codes are 0 for success, 1 when `verify.py` finds an evidence line that is 
 
 ## Privacy
 
-The extracted files and the document contain your raw prompts, which may include secrets or customer data. The extractor writes files with mode `0600`, creates new output directories with mode `0700`, and refuses a directory inside a git worktree, or one where it or a directory above it belongs to another user or can be written by other users (a sticky directory such as `/tmp` above it is allowed). The agent writes the document into the same directory. Keep the output and the document outside any repository and do not share them. The prompt files can contain text you once pasted, such as web pages or logs; the skill tells the agent to treat them as data, and you should keep your agent's permission prompts on while it runs.
+The extracted files and the document contain your raw prompts, which may include secrets or customer data. The extractor writes files with mode `0600`, creates new output directories with mode `0700`, and creates the document file there with mode `0600` for the agent to fill in. It refuses a directory inside a git worktree, and a path containing a quote or a control character. It walks the path one entry at a time and refuses it when another user owns any entry or directory on the way, or can write to a directory on the way that is not sticky (such as `/tmp`). The check reads permission bits only, not ACLs. Keep the output and the document outside any repository and do not share them. The prompt files can contain text you once pasted, such as web pages or logs; the skill tells the agent to treat them as data, and you should keep your agent's permission prompts on while it runs.
 
 ## Development
 
