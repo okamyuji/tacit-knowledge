@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path
@@ -26,6 +27,8 @@ CODEX_INJECTED = ("<environment_context>", "# AGENTS.md instructions", "<recomme
 
 # Codex の session ID は UUIDv7 で、先頭8文字は約65秒ごとにしか変わらない
 SESSION_PREFIX_LEN = 12
+
+SOURCES = ("claude", "codex")
 
 EXCLUDED = "excluded"
 NON_INTERACTIVE = "non-interactive"
@@ -55,6 +58,13 @@ def default_claude_home() -> Path:
 
 def default_codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
+def parse_sources(value: str) -> tuple:
+    sources = tuple(s.strip() for s in value.split(",") if s.strip())
+    if not sources or any(s not in SOURCES for s in sources):
+        raise ValueError(f"source must be a subset of {','.join(SOURCES)}")
+    return sources
 
 
 def encode_project(path: str) -> str:
@@ -246,3 +256,14 @@ def load(project: str, sources: Sequence[str] = ("claude", "codex"),
         load_codex(project, codex_home or default_codex_home(), result)
     result.utterances = _dedup(sorted(result.utterances, key=lambda u: (u.ts, u.tool, u.session)))
     return result
+
+
+def load_or_report(project: str, sources: Sequence[str]) -> Optional[LoadResult]:
+    """Load history, or print where it looked and return None when nothing was found."""
+    result = load(project, sources)
+    if result.utterances:
+        return result
+    print("no utterances found. searched:", file=sys.stderr)
+    for path in result.searched:
+        print(f"  {path}", file=sys.stderr)
+    return None

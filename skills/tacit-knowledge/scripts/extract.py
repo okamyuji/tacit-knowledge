@@ -12,9 +12,8 @@ from datetime import tzinfo
 from pathlib import Path
 from typing import List, Optional, Sequence
 
-from history import Utterance, format_ts, load, resolve_tz, session_prefix
+from history import SOURCES, Utterance, format_ts, load_or_report, parse_sources, resolve_tz, session_prefix
 
-SOURCES = ("claude", "codex")
 DEFAULT_CHUNK_CHARS = 20000
 
 
@@ -48,12 +47,10 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument("--tz", default=None, help="IANA time zone such as Asia/Tokyo (default: local)")
     parser.add_argument("--chunk-chars", type=int, default=DEFAULT_CHUNK_CHARS, help="max characters per file")
     args = parser.parse_args(argv)
-    args.sources = tuple(s.strip() for s in args.source.split(",") if s.strip())
-    if not args.sources or any(s not in SOURCES for s in args.sources):
-        parser.error(f"--source must be a subset of {','.join(SOURCES)}")
     if args.chunk_chars <= 0:
         parser.error("--chunk-chars must be positive")
     try:
+        args.sources = parse_sources(args.source)
         args.zone = resolve_tz(args.tz)
     except ValueError as e:
         parser.error(str(e))
@@ -79,11 +76,8 @@ def _write_chunks(out: Path, chunks: List[List[str]]) -> List[Path]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
-    result = load(args.project, args.sources)
-    if not result.utterances:
-        print("no utterances found. searched:", file=sys.stderr)
-        for path in result.searched:
-            print(f"  {path}", file=sys.stderr)
+    result = load_or_report(args.project, args.sources)
+    if result is None:
         return 2
     if in_git_worktree(args.out.resolve()):
         print(f"warning: {args.out} is inside a git worktree; do not commit these files", file=sys.stderr)

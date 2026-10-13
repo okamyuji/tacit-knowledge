@@ -221,6 +221,14 @@ class FormatTest(unittest.TestCase):
     def test_encode_project_replaces_non_alphanumerics(self):
         self.assertEqual(history.encode_project("/Users/me/devs/_private"), "-Users-me-devs--private")
 
+    def test_parse_sources_accepts_subset_with_spaces(self):
+        self.assertEqual(history.parse_sources(" codex , claude "), ("codex", "claude"))
+
+    def test_parse_sources_rejects_unknown_or_empty(self):
+        for value in ("cursor", "claude,cursor", "", " , "):
+            with self.assertRaises(ValueError):
+                history.parse_sources(value)
+
     def test_session_prefix_keeps_first_twelve_characters(self):
         self.assertEqual(history.session_prefix(fx.CLAUDE_SESSION), "45c391e1-2c4")
 
