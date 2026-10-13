@@ -48,10 +48,11 @@ def build_index(utterances: Sequence[Utterance]) -> Dict[Key, List[str]]:
     return index
 
 
-def verify(lines: Sequence[str], index: Dict[Key, List[str]]) -> Tuple[List[Finding], List[Finding]]:
-    """Return (evidence lines not found in history, claims without evidence)."""
+def verify(lines: Sequence[str], index: Dict[Key, List[str]]) -> Tuple[List[Finding], List[Finding], List[Finding]]:
+    """Return (evidence not found in history, claims without evidence, quoted lines that are not valid evidence)."""
     bad: List[Finding] = []
     unsupported: List[Finding] = []
+    malformed: List[Finding] = []
     claim: Optional[Finding] = None
     for no, raw in enumerate(lines, 1):
         line = raw.rstrip()
@@ -62,6 +63,10 @@ def verify(lines: Sequence[str], index: Dict[Key, List[str]]) -> Tuple[List[Find
             continue
         evidence = parse_evidence(line)
         if evidence is None:
+            # A quoted line that does not parse would otherwise pass as if it had been checked
+            if line.lstrip().startswith(">"):
+                malformed.append((no, line))
+                claim = None
             continue
         claim = None
         ts, session, quote = evidence
@@ -69,7 +74,16 @@ def verify(lines: Sequence[str], index: Dict[Key, List[str]]) -> Tuple[List[Find
             bad.append((no, line))
     if claim is not None:
         unsupported.append(claim)
-    return bad, unsupported
+    return bad, unsupported, malformed
+
+
+def _report(total: int, bad: List[Finding], unsupported: List[Finding], malformed: List[Finding]) -> None:
+    for label, findings in (("evidence not found in history", bad), ("malformed evidence line", malformed),
+                            ("claim without evidence", unsupported)):
+        for no, line in findings:
+            print(f"NG {label} (line {no}): {line.strip()}")
+    print(f"evidence: {total}, verified: {total - len(bad)}, malformed: {len(malformed)}, "
+          f"claims without evidence: {len(unsupported)}")
 
 
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
@@ -101,13 +115,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if total == 0:
         print("no evidence lines found; check the line format in the docstring of verify.py")
         return 1
-    bad, unsupported = verify(lines, build_index(result.utterances))
-    for no, line in bad:
-        print(f"NG evidence not found in history (line {no}): {line.strip()}")
-    for no, line in unsupported:
-        print(f"NG claim without evidence (line {no}): {line.strip()}")
-    print(f"evidence: {total}, verified: {total - len(bad)}, claims without evidence: {len(unsupported)}")
-    return 1 if bad or unsupported else 0
+    bad, unsupported, malformed = verify(lines, build_index(result.utterances))
+    _report(total, bad, unsupported, malformed)
+    return 1 if bad or unsupported or malformed else 0
 
 
 if __name__ == "__main__":

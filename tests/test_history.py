@@ -94,6 +94,66 @@ class ClaudeTest(HistoryTestCase):
         fx.write_claude(self.claude, PROJECT, [fx.claude_user("前")], raw_lines=["", later])
         self.assertEqual(self.texts(self.load()), ["前", "後"])
 
+    def test_counts_message_that_is_not_an_object_as_skipped(self):
+        rec = fx.claude_user("x")
+        rec["message"] = "oops"
+        fx.write_claude(self.claude, PROJECT, [rec, fx.claude_user("残る")])
+        result = self.load()
+        self.assertEqual((self.texts(result), result.skipped), (["残る"], 1))
+
+    def test_counts_timestamp_without_offset_as_skipped(self):
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user("オフセットなし", ts="2026-09-24T01:06:30"),
+                                               fx.claude_user("残る")])
+        result = self.load()
+        self.assertEqual((self.texts(result), result.skipped), (["残る"], 1))
+
+    def test_counts_unreadable_file_as_skipped(self):
+        path = fx.write_claude(self.claude, PROJECT, [fx.claude_user("読めない")], session="locked")
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o600)
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user("読める")])
+        result = self.load()
+        self.assertEqual((self.texts(result), result.skipped), (["読める"], 1))
+
+    def test_keeps_human_text_that_starts_with_caveat(self):
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user("Caveat: this API is flaky, retry twice")])
+        self.assertEqual(self.texts(self.load()), ["Caveat: this API is flaky, retry twice"])
+
+    def test_reads_forked_copy_of_a_record_once(self):
+        rec = fx.claude_user("一度だけ", uuid="11111111-2222-3333-4444-555555555555")
+        fx.write_claude(self.claude, PROJECT, [rec], session="b-fork")
+        fx.write_claude(self.claude, PROJECT, [dict(rec, sessionId="a-orig")], session="a-orig")
+        result = self.load()
+        self.assertEqual([(u.session, u.text) for u in result.utterances], [("a-orig", "一度だけ")])
+
+    def test_keeps_same_text_from_records_with_different_uuids(self):
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user("同じ", uuid="u1")], session="s1")
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user("同じ", uuid="u2")], session="s2")
+        self.assertEqual(self.texts(self.load()), ["同じ", "同じ"])
+
+    def test_ignores_uuid_that_is_not_a_string(self):
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user("一つ目", uuid=7), fx.claude_user("二つ目", uuid=7)])
+        self.assertEqual(self.texts(self.load()), ["一つ目", "二つ目"])
+
+    def test_reads_project_whose_directory_name_is_exactly_at_the_limit(self):
+        project = "/" + "a" * 199
+        self.assertEqual(len(history.encode_project(project)), history.CLAUDE_NAME_LIMIT)
+        fx.write_claude(self.claude, project, [fx.claude_user("ちょうど200字", cwd=project)])
+        self.assertEqual(self.texts(self.load(project=project)), ["ちょうど200字"])
+
+    def test_reads_sessions_started_in_a_subdirectory(self):
+        fx.write_claude(self.claude, "/proj/sub", [fx.claude_user("配下で起動", cwd="/proj/sub")])
+        fx.write_claude(self.claude, "/proj-x", [fx.claude_user("隣のプロジェクト", cwd="/proj-x")], session="sib")
+        self.assertEqual(self.texts(self.load()), ["配下で起動"])
+
+    def test_reads_project_whose_directory_name_was_shortened(self):
+        project = "/" + "a" * 250
+        name = history.encode_project(project)[:200] + "-1a2b3c"
+        path = self.claude / "projects" / name / f"{fx.CLAUDE_SESSION}.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(fx.claude_user("長いパス", cwd=project)) + "\n", encoding="utf-8")
+        self.assertEqual(self.texts(self.load(project=project)), ["長いパス"])
+
     def test_ignores_tool_result_only_content(self):
         content = [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]
         fx.write_claude(self.claude, PROJECT, [fx.claude_user(content)])
@@ -118,7 +178,6 @@ class ClaudeTest(HistoryTestCase):
             "<system-reminder>x</system-reminder>",
             "<bash-input>ls</bash-input>",
             "<user-prompt-submit-hook>x</user-prompt-submit-hook>",
-            "Caveat: The messages below were generated",
             "[Request interrupted by user]",
             "This session is being continued from a previous conversation",
             "  <system-reminder>leading spaces</system-reminder>",
@@ -222,6 +281,14 @@ class CodexTest(HistoryTestCase):
         result = self.load()
         self.assertEqual(self.texts(result), ["前", "後"])
         self.assertEqual(result.skipped, 1)
+
+    def test_counts_records_whose_payload_is_not_an_object_as_skipped(self):
+        meta = fx.codex_meta()
+        meta["payload"] = "x"
+        fx.write_codex(self.codex, [meta, fx.codex_user("metaが壊れている")], session="m" * 36)
+        fx.write_codex(self.codex, [fx.codex_meta(), {"type": "response_item", "payload": ["x"]}, fx.codex_user("残る")])
+        result = self.load()
+        self.assertEqual((self.texts(result), result.skipped), (["残る"], 2))
 
     def test_skips_session_of_other_project(self):
         fx.write_codex(self.codex, [fx.codex_meta(cwd="/other"), fx.codex_user("別")])

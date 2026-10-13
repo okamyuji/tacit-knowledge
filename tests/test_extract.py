@@ -118,7 +118,11 @@ class MainTest(unittest.TestCase):
         (self.out / "prompts-009.txt").write_text("old", encoding="utf-8")
         (self.out / "notes.md").write_text("keep", encoding="utf-8")
         (self.out / "prompts-v2.txt").write_text("keep", encoding="utf-8")
+        (self.out / "prompts-2024-notes.txt").write_text("keep", encoding="utf-8")
+        (self.out / "prompts-1001.txt").write_text("old", encoding="utf-8")
         self.run_main()
+        self.assertFalse((self.out / "prompts-1001.txt").exists())
+        self.assertTrue((self.out / "prompts-2024-notes.txt").exists())
         self.assertFalse((self.out / "prompts-009.txt").exists())
         self.assertTrue((self.out / "notes.md").exists())
         self.assertTrue((self.out / "prompts-v2.txt").exists())
@@ -139,7 +143,8 @@ class MainTest(unittest.TestCase):
         self.out = self.root / "a" / "b" / "out"
         code, _, _ = self.run_main()
         self.assertEqual(code, 0)
-        self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), 0o700)
+        for directory in (self.root / "a", self.root / "a" / "b", self.out):
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700, directory)
 
     def test_accepts_chunk_size_of_one(self):
         self.write_history()

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from datetime import tzinfo
 from pathlib import Path
@@ -67,10 +68,15 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 def _write_chunks(out: Path, chunks: List[List[str]]) -> None:
     # An existing directory belongs to the user, so leave its mode alone; the files are always 0600.
     if not out.is_dir():
-        out.mkdir(parents=True)
-        out.chmod(0o700)
-    for stale in out.glob("prompts-[0-9][0-9][0-9].txt"):
-        stale.unlink()
+        # mkdir(parents=True) ignores mode for the parents it creates, but honours the umask
+        previous = os.umask(0o077)
+        try:
+            out.mkdir(parents=True)
+        finally:
+            os.umask(previous)
+    for stale in out.glob("prompts-*.txt"):
+        if re.fullmatch(r"prompts-\d{3,}\.txt", stale.name):
+            stale.unlink()
     for i, blocks in enumerate(chunks, 1):
         fd = os.open(out / f"prompts-{i:03d}.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as f:

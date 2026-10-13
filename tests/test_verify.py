@@ -46,15 +46,21 @@ class VerifyTest(unittest.TestCase):
         return verify.verify(text.splitlines(keepends=True), self.index)
 
     def test_accepts_evidence_that_exists(self):
-        self.assertEqual(self.run_verify(f"- 主張\n{GOOD}\n"), ([], []))
+        self.assertEqual(self.run_verify(f"- 主張\n{GOOD}\n"), ([], [], []))
+
+    def test_reports_quoted_lines_that_are_not_valid_evidence(self):
+        broken = ["  > 2026-09-24 10:05+09:00 45c391e1-2c4 「空白」", "  > 2026-09-24 10:05 45c391e1-2c4「オフセットなし」",
+                  "  > 2026-09-24 10:05+09:00 45C391E1-2C4「大文字」", "> メモ"]
+        result = self.run_verify("- 主張\n" + "\n".join(broken) + "\n")
+        self.assertEqual(result, ([], [], [(i + 2, line) for i, line in enumerate(broken)]))
 
     def test_accepts_same_instant_written_in_other_offset(self):
         line = "  > 2026-09-23 20:05-05:00 45c391e1-2c4「公式ドキュメントで確認してください」"
-        self.assertEqual(self.run_verify(f"- 主張\n{line}\n"), ([], []))
+        self.assertEqual(self.run_verify(f"- 主張\n{line}\n"), ([], [], []))
 
     def test_rejects_quote_not_in_utterance(self):
         line = "  > 2026-09-24 10:05+09:00 45c391e1-2c4「公式ドキュメントは見なくてよい」"
-        self.assertEqual(self.run_verify(f"- 主張\n{line}\n"), ([(2, line)], []))
+        self.assertEqual(self.run_verify(f"- 主張\n{line}\n"), ([(2, line)], [], []))
 
     def test_rejects_shifted_time(self):
         line = "  > 2026-09-24 01:05+09:00 45c391e1-2c4「公式ドキュメントで確認してください」"
@@ -71,10 +77,10 @@ class VerifyTest(unittest.TestCase):
     def test_matches_utterance_with_fractional_seconds(self):
         index = verify.build_index([utterance("小数秒", ts=datetime(2026, 9, 24, 1, 5, 30, 500000, tzinfo=timezone.utc))])
         line = "  > 2026-09-24 10:05+09:00 45c391e1-2c4「小数秒」"
-        self.assertEqual(verify.verify([f"- 主張\n", line], index), ([], []))
+        self.assertEqual(verify.verify([f"- 主張\n", line], index), ([], [], []))
 
     def test_accepts_evidence_after_blank_line(self):
-        self.assertEqual(self.run_verify(f"- 主張\n\n{GOOD}\n"), ([], []))
+        self.assertEqual(self.run_verify(f"- 主張\n\n{GOOD}\n"), ([], [], []))
 
 
 class MainTest(unittest.TestCase):
@@ -105,7 +111,7 @@ class MainTest(unittest.TestCase):
         codex_line = "  > 2026-09-25 11:00+09:00 01a12ca3-2e3「このまま進めてください」"
         code, stdout, _ = self.run_main(f"- 主張\n{GOOD}\n{codex_line}\n")
         self.assertEqual(code, 0)
-        self.assertIn("evidence: 2, verified: 2, claims without evidence: 0", stdout)
+        self.assertIn("evidence: 2, verified: 2, malformed: 0, claims without evidence: 0", stdout)
 
     def test_returns_1_and_prints_failing_lines(self):
         self.write_history()
@@ -114,6 +120,13 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("NG evidence not found in history (line 2)", stdout)
         self.assertIn("NG claim without evidence (line 3)", stdout)
+
+    def test_returns_1_and_prints_malformed_evidence(self):
+        self.write_history()
+        code, stdout, _ = self.run_main(f"- 主張\n{GOOD}\n  > 2026-09-24 10:05 45c391e1-2c4「オフセットなし」\n")
+        self.assertEqual(code, 1)
+        self.assertIn("NG malformed evidence line (line 3)", stdout)
+        self.assertIn("evidence: 1, verified: 1, malformed: 1, claims without evidence: 0", stdout)
 
     def test_verifies_quotes_from_non_interactive_sessions_only_when_asked(self):
         fx.write_codex(self.codex, [fx.codex_meta(source="exec"), fx.codex_user("手で打った exec の指示")])
@@ -134,7 +147,7 @@ class MainTest(unittest.TestCase):
         bad = "  > 2026-09-24 10:05+09:00 45c391e1-2c4「偽の引用」"
         code, stdout, _ = self.run_main(f"- 主張\n{bad}\n")
         self.assertEqual(code, 1)
-        self.assertIn("evidence: 1, verified: 0, claims without evidence: 0", stdout)
+        self.assertIn("evidence: 1, verified: 0, malformed: 0, claims without evidence: 0", stdout)
 
     def test_returns_1_when_only_a_claim_lacks_evidence(self):
         self.write_history()

@@ -19,11 +19,13 @@ CLAUDE_INJECTED = (
     "<system-reminder",
     "<bash-",
     "<user-prompt-submit-hook",
-    "Caveat:",
     "[Request interrupted",
     "This session is being continued",
 )
 CODEX_INJECTED = ("<environment_context>", "# AGENTS.md instructions", "<recommended_plugins>")
+
+# Claude Code shortens project directory names longer than this and appends a hash
+CLAUDE_NAME_LIMIT = 200
 
 # Codex session IDs are UUIDv7, whose first 8 characters change only about every 65 seconds
 SESSION_PREFIX_LEN = 12
@@ -42,6 +44,8 @@ class Utterance:
     tool: str
     session: str
     text: str
+    # Claude Code copies records into a new session file on fork and resume, keeping their uuid
+    record: str = ""
 
 
 @dataclass
@@ -93,7 +97,10 @@ def format_ts(ts: datetime, tz: Optional[tzinfo]) -> str:
 
 def parse_ts(value: str) -> datetime:
     # Python 3.9 and 3.10 cannot parse a trailing "Z"
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if ts.tzinfo is None:
+        raise ValueError
+    return ts
 
 
 def minute_key(ts: datetime) -> int:
@@ -110,8 +117,13 @@ def is_under(child: str, parent: str) -> bool:
 
 
 def _read_jsonl(path: Path) -> Iterator[Optional[dict]]:
-    """Yield each record, or None for a line that is not a JSON object in UTF-8."""
-    with open(path, "rb") as f:
+    """Yield each record, or None for a line that is not a JSON object in UTF-8 or a file that cannot be read."""
+    try:
+        f = open(path, "rb")
+    except OSError:
+        yield None
+        return
+    with f:
         for line in f:
             if not line.strip():
                 continue
@@ -123,13 +135,14 @@ def _read_jsonl(path: Path) -> Iterator[Optional[dict]]:
             yield rec if isinstance(rec, dict) else None
 
 
-def _utterance(tool: str, session: str, ts: object, text: str, injected: Sequence[str]) -> Union[Utterance, str, None]:
+def _utterance(tool: str, session: str, ts: object, text: str, injected: Sequence[str],
+               record: str = "") -> Union[Utterance, str, None]:
     if not text.strip():
         return None
     if text.lstrip().startswith(injected):
         return EXCLUDED
     try:
-        return Utterance(parse_ts(str(ts)), tool, session, text)
+        return Utterance(parse_ts(str(ts)), tool, session, text, record)
     except ValueError:
         return BROKEN
 
@@ -155,8 +168,12 @@ def _claude_text(content: object) -> str:
 def _claude_outcome(rec: dict, session: str) -> Union[Utterance, str, None]:
     if rec.get("type") != "user" or rec.get("isMeta") or rec.get("isSidechain"):
         return None
-    text = _claude_text((rec.get("message") or {}).get("content"))
-    return _utterance("claude", session, rec.get("timestamp"), text, CLAUDE_INJECTED)
+    message = rec.get("message")
+    if not isinstance(message, dict):
+        return BROKEN
+    uid = rec.get("uuid")
+    record = uid if isinstance(uid, str) else ""
+    return _utterance("claude", session, rec.get("timestamp"), _claude_text(message.get("content")), CLAUDE_INJECTED, record)
 
 
 def _load_claude_file(path: Path, project: str, result: LoadResult, include_non_interactive: bool) -> None:
@@ -173,7 +190,8 @@ def _load_claude_file(path: Path, project: str, result: LoadResult, include_non_
         entrypoints.add(str(rec.get("entrypoint")))
         # Claude Code names each transcript after its session ID
         _tally(pending, _claude_outcome(rec, path.stem), found)
-    if cwd_matches is False:
+    # Sibling projects share directory-name prefixes, so a session counts only when its cwd is inside the project
+    if not cwd_matches:
         return
     if any(e.startswith("sdk") for e in entrypoints) and not include_non_interactive:
         result.excluded_sessions += 1
@@ -183,18 +201,28 @@ def _load_claude_file(path: Path, project: str, result: LoadResult, include_non_
     result.utterances.extend(found)
 
 
+def _claude_dirs(root: Path, names: Sequence[str]) -> List[Path]:
+    """The project's own directory, directories of sessions started below it, and shortened long names."""
+    dirs = set()
+    for name in names:
+        if len(name) <= CLAUDE_NAME_LIMIT:
+            dirs.add(root / name)
+        dirs.update(root.glob(name[:CLAUDE_NAME_LIMIT] + "-*"))
+    return sorted(dirs)
+
+
 def load_claude(project: str, home: Path, result: LoadResult, include_non_interactive: bool) -> None:
     real = _real(project)
-    dirs = sorted({encode_project(os.path.abspath(os.path.expanduser(project))), encode_project(real)})
-    for name in dirs:
-        directory = home / "projects" / name
-        result.searched.append(str(directory))
+    names = sorted({encode_project(os.path.abspath(os.path.expanduser(project))), encode_project(real)})
+    root = home / "projects"
+    result.searched.extend(str(root / name[:CLAUDE_NAME_LIMIT]) for name in names)
+    for directory in _claude_dirs(root, names):
         for path in sorted(directory.glob("*.jsonl")):
             _load_claude_file(path, real, result, include_non_interactive)
 
 
 def _codex_texts(rec: dict) -> List[str]:
-    payload = rec.get("payload") or {}
+    payload = rec["payload"]
     if rec.get("type") != "response_item" or payload.get("type") != "message" or payload.get("role") != "user":
         return []
     return [c["text"] for c in payload.get("content") or []
@@ -205,8 +233,8 @@ def _codex_status(meta: Optional[dict], project: str) -> Optional[str]:
     """Return None when the file should be read, otherwise why it is not."""
     if not meta or meta.get("type") != "session_meta":
         return BROKEN
-    payload = meta.get("payload") or {}
-    if not payload.get("cwd") or not payload.get("id"):
+    payload = meta.get("payload")
+    if not isinstance(payload, dict) or not payload.get("cwd") or not payload.get("id"):
         return BROKEN
     if not is_under(_real(str(payload["cwd"])), project):
         return OTHER_PROJECT
@@ -230,7 +258,7 @@ def _load_codex_file(path: Path, project: str, result: LoadResult, include_non_i
         return
     session = str(meta["payload"]["id"])
     for rec in records:
-        if rec is None:
+        if rec is None or not isinstance(rec.get("payload"), dict):
             result.skipped += 1
             continue
         for text in _codex_texts(rec):
@@ -249,7 +277,7 @@ def _dedup(utterances: Sequence[Utterance]) -> List[Utterance]:
     seen = set()
     out = []
     for u in utterances:
-        key = (u.session, minute_key(u.ts), u.text)
+        key = u.record or (u.session, minute_key(u.ts), u.text)
         if key not in seen:
             seen.add(key)
             out.append(u)
