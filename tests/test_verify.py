@@ -106,6 +106,12 @@ class MainTest(unittest.TestCase):
             code = verify.main([str(self.doc), "--project", "/proj"])
         return code, stdout.getvalue(), stderr.getvalue()
 
+    def test_expands_tilde_in_document_path(self):
+        self.write_history()
+        self.doc.write_text(f"- 主張\n{GOOD}\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"HOME": str(self.root)}), redirect_stdout(io.StringIO()):
+            self.assertEqual(verify.main(["~/doc.md", "--project", "/proj"]), 0)
+
     def test_returns_0_when_all_evidence_verifies_across_tools(self):
         self.write_history()
         codex_line = "  > 2026-09-25 11:00+09:00 01a12ca3-2e3「このまま進めてください」"

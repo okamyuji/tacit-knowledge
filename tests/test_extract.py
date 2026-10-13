@@ -145,7 +145,7 @@ class MainTest(unittest.TestCase):
             "utterances: 3 (claude 2, codex 1)",
             "period: 2026-09-23 21:05-04:00 .. 2026-09-25 23:00-04:00",
             "excluded: 1 injected texts, 1 non-interactive sessions, 0 unreadable records",
-            f"files: 1 in {self.out}",
+            f"files: 1 in {self.out.resolve()}",
             "note: Claude Code deletes transcripts older than cleanupPeriodDays (default 30 days).",
         ])
 
@@ -230,6 +230,68 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("owned by another user", stderr)
         self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_refuses_new_output_directory_under_a_parent_owned_by_another_user(self):
+        self.write_history()
+        with mock.patch.object(extract.os, "getuid", return_value=os.getuid() + 1):
+            code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("is owned by another user", stderr)
+        self.assertFalse(self.out.exists())
+
+    def test_refuses_existing_output_directory_owned_by_root(self):
+        self.write_history()
+        self.out.mkdir(mode=0o700)
+        out, real_stat = self.out.resolve(), Path.stat
+        root_owned = os.stat_result((stat.S_IFDIR | 0o755, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+        def fake_stat(path, **kwargs):
+            return root_owned if path == out else real_stat(path, **kwargs)
+
+        with mock.patch.object(extract.Path, "stat", autospec=True, side_effect=fake_stat):
+            code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn(f"{out} is owned by another user", stderr)
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_refuses_parent_directory_writable_by_others_unless_sticky(self):
+        self.write_history()
+        shared = self.root / "shared"
+        shared.mkdir()
+        self.out = shared / "out"
+        shared.chmod(0o777)
+        code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn(f"{shared.resolve()} is writable by other users", stderr)
+        self.assertFalse(self.out.exists())
+        shared.chmod(0o1777)
+        self.assertEqual(self.run_main()[0], 0)
+
+    def test_refuses_sticky_output_directory_writable_by_others(self):
+        self.write_history()
+        self.out.mkdir()
+        self.out.chmod(0o1777)
+        code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("writable by other users", stderr)
+
+    def test_resolves_symlinked_output_directory_and_prints_real_path(self):
+        self.write_history()
+        real = self.root / "real"
+        real.mkdir(mode=0o700)
+        self.out.symlink_to(real)
+        code, stdout, _ = self.run_main()
+        self.assertEqual(code, 0)
+        self.assertIn(f"files: 1 in {real.resolve()}", stdout)
+        self.assertTrue((real / "prompts-001.txt").exists())
+
+    def test_expands_tilde_in_output_directory(self):
+        self.write_history()
+        with mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            code, stdout, _ = self.run_main("--out", "~/notes")
+        self.assertEqual(code, 0)
+        self.assertTrue((self.root / "notes" / "prompts-001.txt").exists())
+        self.assertIn(f"files: 1 in {(self.root / 'notes').resolve()}", stdout)
 
     def test_does_not_follow_a_symlink_at_an_output_name(self):
         self.out.mkdir()

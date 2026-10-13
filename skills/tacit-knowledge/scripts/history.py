@@ -239,16 +239,20 @@ def load_claude(project: str, home: Path, result: LoadResult, include_non_intera
             _load_claude_file(path, real, result, include_non_interactive, directory.name in names)
 
 
-def _codex_texts(rec: dict) -> Optional[List[str]]:
-    """Return None when a user message has content of an unexpected shape."""
+def _codex_texts(rec: Optional[dict]) -> Optional[List[str]]:
+    """Return None when a record or a user message has an unexpected shape."""
+    if rec is None or not isinstance(rec.get("payload"), dict):
+        return None
     payload = rec["payload"]
     if rec.get("type") != "response_item" or payload.get("type") != "message" or payload.get("role") != "user":
         return []
     content = payload.get("content")
     if content is None:
         return []
-    if not isinstance(content, list):
-        return None
+    return _input_texts(content) if isinstance(content, list) else None
+
+
+def _input_texts(content: list) -> List[str]:
     return [c["text"] for c in content
             if isinstance(c, dict) and c.get("type") == "input_text" and isinstance(c.get("text"), str)]
 
@@ -282,7 +286,7 @@ def _load_codex_file(path: Path, project: str, result: LoadResult, include_non_i
         return
     session = str(meta["payload"]["id"])
     for rec in records:
-        texts = _codex_texts(rec) if rec is not None and isinstance(rec.get("payload"), dict) else None
+        texts = _codex_texts(rec)
         if texts is None:
             result.skipped += 1
             continue

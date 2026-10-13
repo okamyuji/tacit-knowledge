@@ -88,7 +88,7 @@ def _report(total: int, bad: List[Finding], unsupported: List[Finding], malforme
 
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify evidence lines against agent history.")
-    parser.add_argument("doc", help="tacit-knowledge document to check")
+    parser.add_argument("doc", type=os.path.expanduser, help="tacit-knowledge document to check")
     parser.add_argument("--project", default=os.getcwd(), help="project directory (default: current directory)")
     parser.add_argument("--source", default=",".join(SOURCES), help="comma-separated: claude,codex")
     parser.add_argument("--include-non-interactive", action="store_true",

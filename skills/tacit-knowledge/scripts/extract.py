@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import stat
 import sys
 from datetime import tzinfo
 from pathlib import Path
@@ -48,7 +49,7 @@ def in_git_worktree(path: Path) -> bool:
 
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract human utterances from agent history.")
-    parser.add_argument("--out", required=True, type=Path, help="output directory (do not commit it)")
+    parser.add_argument("--out", required=True, type=lambda s: Path(s).expanduser().resolve(), help="output directory (do not commit it)")
     parser.add_argument("--project", default=os.getcwd(), help="project directory (default: current directory)")
     parser.add_argument("--source", default=",".join(SOURCES), help="comma-separated: claude,codex")
     parser.add_argument("--include-non-interactive", action="store_true",
@@ -66,12 +67,29 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     return args
 
 
+def _check_ancestor(directory: Path) -> os.stat_result:
+    st = directory.stat()
+    # Windows has no uid; there only the mode checks run
+    if hasattr(os, "getuid") and st.st_uid not in (0, os.getuid()):
+        raise OSError(f"{directory} is owned by another user")
+    # others can rename entries of a writable directory, but not ours in a sticky one such as /tmp
+    if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
+        raise OSError(f"{directory} is writable by other users")
+    return st
+
+
 def _prepare_dir(out: Path) -> None:
-    # Leave the mode of an existing directory alone, but refuse one that others own or can write to:
-    # they could swap an output name for a symlink between our unlink and open.
+    """`out` is already resolved, so every directory on the way to it is checked, not just the last one.
+
+    Others must not be able to swap an output name, or the directory itself, for a symlink between our
+    checks and the writes; the agent later writes the document into the same directory.
+    """
+    for parent in out.parents:
+        if parent.exists():
+            _check_ancestor(parent)
     if out.is_dir():
-        st = out.stat()
-        # Windows has no uid; there the mode check below is the only guard
+        # Leave the mode of an existing directory alone, but hold it to stricter rules than its parents
+        st = _check_ancestor(out)
         if hasattr(os, "getuid") and st.st_uid != os.getuid():
             raise OSError(f"{out} is owned by another user")
         if st.st_mode & 0o022:
@@ -103,7 +121,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result = load_or_report(args.project, args.sources, args.include_non_interactive)
     if result is None:
         return 2
-    if in_git_worktree(args.out.resolve()):
+    if in_git_worktree(args.out):
         print(f"refusing to write raw prompts inside a git worktree: {args.out}", file=sys.stderr)
         return 2
     utts = dedup(result.utterances)
