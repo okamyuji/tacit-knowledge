@@ -49,7 +49,7 @@ def in_git_worktree(path: Path) -> bool:
 
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract human utterances from agent history.")
-    parser.add_argument("--out", required=True, type=lambda s: Path(s).expanduser().resolve(), help="output directory (do not commit it)")
+    parser.add_argument("--out", required=True, type=lambda s: Path(os.path.abspath(os.path.expanduser(s))), help="output directory (do not commit it)")
     parser.add_argument("--project", default=os.getcwd(), help="project directory (default: current directory)")
     parser.add_argument("--source", default=",".join(SOURCES), help="comma-separated: claude,codex")
     parser.add_argument("--include-non-interactive", action="store_true",
@@ -67,40 +67,92 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     return args
 
 
-def _check_ancestor(directory: Path) -> os.stat_result:
-    st = directory.stat()
+MAX_SYMLINKS = 40
+DOCUMENT = "tacit-knowledge.md"
+UNSAFE_CHARS = re.compile(r"['\x00-\x1f\x7f]")
+
+
+def _owned_by_other(st: os.stat_result) -> bool:
     # Windows has no uid; there only the mode checks run
-    if hasattr(os, "getuid") and st.st_uid not in (0, os.getuid()):
-        raise OSError(f"{directory} is owned by another user")
-    # others can rename entries of a writable directory, but not ours in a sticky one such as /tmp
+    return hasattr(os, "getuid") and st.st_uid not in (0, os.getuid())
+
+
+def _check_entry(entry: Path, st: os.stat_result) -> None:
+    if _owned_by_other(st):
+        raise OSError(f"{entry} is owned by another user")
+    if stat.S_ISLNK(st.st_mode):
+        return
+    if not stat.S_ISDIR(st.st_mode):
+        raise OSError(f"{entry} is not a directory")
     if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
-        raise OSError(f"{directory} is writable by other users")
-    return st
+        raise OSError(f"{entry} is writable by other users")
+
+
+def walk(path: Path) -> Path:
+    """Resolve an absolute path one entry at a time, refusing anything another user could swap.
+
+    Every entry must belong to the user or root, and every directory must be writable only by them unless
+    it is sticky, where others cannot rename or remove our entries. What passes cannot change under us.
+    Returns the real path; missing trailing parts are appended unchecked.
+    """
+    current, parts, links = Path(path.anchor), list(path.parts[1:]), 0
+    while parts:
+        name = parts.pop(0)
+        if name == "..":
+            current = current.parent
+            continue
+        entry = current / name
+        try:
+            st = entry.lstat()
+        except FileNotFoundError:
+            return entry.joinpath(*parts)
+        _check_entry(entry, st)
+        if stat.S_ISLNK(st.st_mode):
+            links += 1
+            if links > MAX_SYMLINKS:
+                raise OSError(f"too many symlinks in {path}")
+            # join() keeps an absolute target as is and puts a relative one under the link's directory
+            target = Path(os.path.join(current, os.readlink(entry)))
+            current, parts = Path(target.anchor), list(target.parts[1:]) + parts
+            continue
+        current = entry
+    return current
+
+
+def check_name(path: Path) -> None:
+    # The agent pastes this path into shell commands in single quotes
+    if UNSAFE_CHARS.search(str(path)):
+        raise OSError(f"{path!r} contains a quote or a control character")
 
 
 def _prepare_dir(out: Path) -> None:
-    """`out` is already resolved, so every directory on the way to it is checked, not just the last one.
-
-    Others must not be able to swap an output name, or the directory itself, for a symlink between our
-    checks and the writes; the agent later writes the document into the same directory.
-    """
-    for parent in out.parents:
-        if parent.exists():
-            _check_ancestor(parent)
-    if out.is_dir():
-        # Leave the mode of an existing directory alone, but hold it to stricter rules than its parents
-        st = _check_ancestor(out)
-        if hasattr(os, "getuid") and st.st_uid != os.getuid():
-            raise OSError(f"{out} is owned by another user")
-        if st.st_mode & 0o022:
-            raise OSError(f"{out} is writable by other users")
-        return
+    """`out` comes from walk(); walk it again after creating it, since another user may have raced us."""
     # mkdir(parents=True) ignores mode for the parents it creates, but honours the umask
     previous = os.umask(0o077)
     try:
-        out.mkdir(parents=True)
+        out.mkdir(parents=True, exist_ok=True)
     finally:
         os.umask(previous)
+    if walk(out) != out:
+        raise OSError(f"{out} changed while it was being created")
+    st = out.lstat()
+    # The leaf is held to stricter rules than its parents; an existing one keeps its mode
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        raise OSError(f"{out} is owned by another user")
+    if st.st_mode & 0o022:
+        raise OSError(f"{out} is writable by other users")
+
+
+def _prepare_document(out: Path) -> Path:
+    doc = out / DOCUMENT
+    try:
+        os.close(os.open(doc, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
+        if not stat.S_ISREG(doc.lstat().st_mode):
+            raise OSError(f"{doc} is not a regular file") from None
+        # Only the user can write to `out`, so the file checked above is the one changed here
+        doc.chmod(0o600)
+    return doc
 
 
 def _write_chunks(out: Path, chunks: List[List[str]]) -> None:
@@ -121,22 +173,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result = load_or_report(args.project, args.sources, args.include_non_interactive)
     if result is None:
         return 2
-    if in_git_worktree(args.out):
-        print(f"refusing to write raw prompts inside a git worktree: {args.out}", file=sys.stderr)
+    try:
+        out = walk(args.out)
+        check_name(out)
+    except OSError as e:
+        print(f"refusing output directory {args.out}: {e}", file=sys.stderr)
+        return 2
+    if in_git_worktree(out):
+        print(f"refusing to write raw prompts inside a git worktree: {out}", file=sys.stderr)
         return 2
     utts = dedup(result.utterances)
     chunks = chunk([render(u, args.zone) for u in utts], args.chunk_chars)
     try:
-        _write_chunks(args.out, chunks)
+        _write_chunks(out, chunks)
+        doc = _prepare_document(out)
     except OSError as e:
-        print(f"cannot write to {args.out}: {e}", file=sys.stderr)
+        print(f"cannot write to {out}: {e}", file=sys.stderr)
         return 2
     by_tool = ", ".join(f"{t} {sum(1 for u in utts if u.tool == t)}" for t in args.sources)
     print(f"utterances: {len(utts)} ({by_tool})")
     print(f"period: {format_ts(utts[0].ts, args.zone)} .. {format_ts(utts[-1].ts, args.zone)}")
     print(f"excluded: {result.excluded} injected texts, {result.excluded_sessions} non-interactive sessions, "
           f"{result.skipped} unreadable records")
-    print(f"files: {len(chunks)} in {args.out}")
+    print(f"files: {len(chunks)} in {out}")
+    print(f"document: {doc}")
     print("note: Claude Code deletes transcripts older than cleanupPeriodDays (default 30 days).")
     return 0
 

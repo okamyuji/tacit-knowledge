@@ -50,6 +50,49 @@ class GitWorktreeTest(unittest.TestCase):
             self.assertFalse(extract.in_git_worktree(Path(tmp) / "out"))
 
 
+class WalkTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(os.path.realpath(tmp.name))
+
+    def test_follows_relative_symlink_with_parent_reference(self):
+        (self.root / "a").mkdir()
+        (self.root / "real").mkdir()
+        (self.root / "a" / "link").symlink_to("../real")
+        self.assertEqual(extract.walk(self.root / "a" / "link" / "out"), self.root / "real" / "out")
+
+    def test_follows_absolute_symlink(self):
+        (self.root / "real").mkdir()
+        (self.root / "link").symlink_to(self.root / "real")
+        self.assertEqual(extract.walk(self.root / "link"), self.root / "real")
+
+    def test_allows_up_to_the_symlink_limit(self):
+        (self.root / "real").mkdir()
+        previous = self.root / "real"
+        for i in range(extract.MAX_SYMLINKS):
+            link = self.root / f"l{i}"
+            link.symlink_to(previous)
+            previous = link
+        self.assertEqual(extract.walk(previous), self.root / "real")
+        over = self.root / "over"
+        over.symlink_to(previous)
+        with self.assertRaisesRegex(OSError, "too many symlinks in"):
+            extract.walk(over)
+
+    def test_refuses_symlink_loop(self):
+        (self.root / "x").symlink_to(self.root / "y")
+        (self.root / "y").symlink_to(self.root / "x")
+        with self.assertRaisesRegex(OSError, "too many symlinks in"):
+            extract.walk(self.root / "x" / "out")
+
+    def test_prepare_refuses_directory_that_resolves_elsewhere_after_creation(self):
+        out = self.root / "out"
+        with mock.patch.object(extract, "walk", return_value=self.root / "other"):
+            with self.assertRaisesRegex(OSError, "changed while it was being created"):
+                extract._prepare_dir(out)
+
+
 class MainTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -119,7 +162,7 @@ class MainTest(unittest.TestCase):
         self.write_history()
         code, _, _ = self.run_main("--chunk-chars", "10")
         self.assertEqual(code, 0)
-        self.assertEqual(sorted(p.name for p in self.out.iterdir()), ["prompts-001.txt", "prompts-002.txt", "prompts-003.txt"])
+        self.assertEqual(sorted(p.name for p in self.out.glob("prompts-*")), ["prompts-001.txt", "prompts-002.txt", "prompts-003.txt"])
 
     def test_removes_stale_prompt_files_but_keeps_other_files(self):
         self.write_history()
@@ -146,6 +189,7 @@ class MainTest(unittest.TestCase):
             "period: 2026-09-23 21:05-04:00 .. 2026-09-25 23:00-04:00",
             "excluded: 1 injected texts, 1 non-interactive sessions, 0 unreadable records",
             f"files: 1 in {self.out.resolve()}",
+            f"document: {self.out.resolve() / 'tacit-knowledge.md'}",
             "note: Claude Code deletes transcripts older than cleanupPeriodDays (default 30 days).",
         ])
 
@@ -242,13 +286,13 @@ class MainTest(unittest.TestCase):
     def test_refuses_existing_output_directory_owned_by_root(self):
         self.write_history()
         self.out.mkdir(mode=0o700)
-        out, real_stat = self.out.resolve(), Path.stat
+        out, real_lstat = self.out.resolve(), Path.lstat
         root_owned = os.stat_result((stat.S_IFDIR | 0o755, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
-        def fake_stat(path, **kwargs):
-            return root_owned if path == out else real_stat(path, **kwargs)
+        def fake_lstat(path):
+            return root_owned if path == out else real_lstat(path)
 
-        with mock.patch.object(extract.Path, "stat", autospec=True, side_effect=fake_stat):
+        with mock.patch.object(extract.Path, "lstat", autospec=True, side_effect=fake_lstat):
             code, _, stderr = self.run_main()
         self.assertEqual(code, 2)
         self.assertIn(f"{out} is owned by another user", stderr)
@@ -293,13 +337,81 @@ class MainTest(unittest.TestCase):
         self.assertTrue((self.root / "notes" / "prompts-001.txt").exists())
         self.assertIn(f"files: 1 in {(self.root / 'notes').resolve()}", stdout)
 
+    def test_refuses_symlink_on_the_path_owned_by_another_user(self):
+        self.write_history()
+        (self.root / "real").mkdir(mode=0o700)
+        link = self.root / "link"
+        link.symlink_to(self.root / "real")
+        self.out = link / "out"
+        real_lstat = Path.lstat
+        foreign = os.stat_result((stat.S_IFLNK | 0o755, 0, 0, 0, os.getuid() + 1, 0, 0, 0, 0, 0))
+
+        def fake_lstat(path):
+            return foreign if path == link.resolve().parent / "link" else real_lstat(path)
+
+        with mock.patch.object(extract.Path, "lstat", autospec=True, side_effect=fake_lstat):
+            code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("link is owned by another user", stderr)
+        self.assertFalse((self.root / "real" / "out").exists())
+
+    def test_refuses_output_path_with_a_quote_or_control_character(self):
+        self.write_history()
+        for name in ("it's", "line\nbreak"):
+            real = self.root / name
+            real.mkdir(mode=0o700)
+            self.out = self.root / "link"
+            if self.out.is_symlink():
+                self.out.unlink()
+            # a symlink keeps the typed path clean while the resolved one is not
+            self.out.symlink_to(real)
+            code, _, stderr = self.run_main()
+            self.assertEqual(code, 2, name)
+            self.assertIn("contains a quote or a control character", stderr)
+            self.assertEqual(list(real.iterdir()), [])
+
+    def test_refuses_path_whose_component_is_a_file(self):
+        self.write_history()
+        (self.root / "file").write_text("x", encoding="utf-8")
+        self.out = self.root / "file" / "out"
+        code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("is not a directory", stderr)
+
+    def test_creates_private_empty_document(self):
+        self.write_history()
+        self.assertEqual(self.run_main()[0], 0)
+        doc = self.out / "tacit-knowledge.md"
+        self.assertEqual((doc.read_text(encoding="utf-8"), stat.S_IMODE(doc.stat().st_mode)), ("", 0o600))
+
+    def test_keeps_existing_document_and_makes_it_private(self):
+        self.write_history()
+        self.out.mkdir(mode=0o700)
+        doc = self.out / "tacit-knowledge.md"
+        doc.write_text("# 以前の文書\n", encoding="utf-8")
+        doc.chmod(0o644)
+        self.assertEqual(self.run_main()[0], 0)
+        self.assertEqual((doc.read_text(encoding="utf-8"), stat.S_IMODE(doc.stat().st_mode)), ("# 以前の文書\n", 0o600))
+
+    def test_refuses_document_that_is_a_symlink(self):
+        self.write_history()
+        self.out.mkdir(mode=0o700)
+        target = self.root / "elsewhere.md"
+        target.write_text("keep", encoding="utf-8")
+        target.chmod(0o644)
+        (self.out / "tacit-knowledge.md").symlink_to(target)
+        code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("is not a regular file", stderr)
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
+
     def test_does_not_follow_a_symlink_at_an_output_name(self):
         self.out.mkdir()
         victim = self.root / "victim.txt"
         victim.write_text("keep", encoding="utf-8")
         (self.out / "prompts-001.txt").symlink_to(victim)
         with mock.patch.object(Path, "glob", return_value=iter([])), self.assertRaises(FileExistsError):
-            extract._write_chunks(self.out, [["本文"]])
+            extract._write_chunks(extract.walk(self.out), [["本文"]])
         self.assertEqual(victim.read_text(encoding="utf-8"), "keep")
 
     def test_writes_utterance_with_a_lone_surrogate(self):
