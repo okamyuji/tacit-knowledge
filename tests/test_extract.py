@@ -85,6 +85,14 @@ class MainTest(unittest.TestCase):
                          "=== 2026-09-24 22:00-04:00 codex 01a12ca3-2e3 (6)\n二つ目の発話\n"
                          "=== 2026-09-25 23:00-04:00 claude 45c391e1-2c4 (6)\n三つ目の発話\n")
 
+    def test_writes_one_copy_of_a_forked_record(self):
+        rec = fx.claude_user("複製された発話", uuid="11111111-2222-3333-4444-555555555555")
+        fx.write_claude(self.claude, "/proj", [rec], session="b-copy")
+        fx.write_claude(self.claude, "/proj", [rec], session="a-copy")
+        _, stdout, _ = self.run_main()
+        self.assertEqual((self.out / "prompts-001.txt").read_text(encoding="utf-8").count("複製された発話"), 1)
+        self.assertIn("utterances: 1 (claude 1, codex 0)", stdout)
+
     def test_restricts_permissions_of_output(self):
         self.write_history()
         self.run_main()
@@ -120,9 +128,11 @@ class MainTest(unittest.TestCase):
         (self.out / "prompts-v2.txt").write_text("keep", encoding="utf-8")
         (self.out / "prompts-2024-notes.txt").write_text("keep", encoding="utf-8")
         (self.out / "prompts-1001.txt").write_text("old", encoding="utf-8")
+        (self.out / "prompts-\u0661\u0662\u0663.txt").write_text("keep", encoding="utf-8")
         self.run_main()
         self.assertFalse((self.out / "prompts-1001.txt").exists())
         self.assertTrue((self.out / "prompts-2024-notes.txt").exists())
+        self.assertTrue((self.out / "prompts-\u0661\u0662\u0663.txt").exists())
         self.assertFalse((self.out / "prompts-009.txt").exists())
         self.assertTrue((self.out / "notes.md").exists())
         self.assertTrue((self.out / "prompts-v2.txt").exists())

@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence, Union
+from typing import Iterator, List, Optional, Sequence, Set, Tuple, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Prefixes of text that the tools, not the person, write into the user turn
@@ -176,29 +176,38 @@ def _claude_outcome(rec: dict, session: str) -> Union[Utterance, str, None]:
     return _utterance("claude", session, rec.get("timestamp"), _claude_text(message.get("content")), CLAUDE_INJECTED, record)
 
 
-def _load_claude_file(path: Path, project: str, result: LoadResult, include_non_interactive: bool) -> None:
-    found: List[Utterance] = []
-    pending = LoadResult()
+def _scan_claude_file(path: Path, project: str) -> Tuple[LoadResult, Optional[bool], Set[str]]:
+    """Read one transcript: (utterances and counts, whether its first cwd is inside the project, entrypoints)."""
+    scan = LoadResult()
     cwd_matches: Optional[bool] = None
-    entrypoints = set()
+    entrypoints: Set[str] = set()
     for rec in _read_jsonl(path):
         if rec is None:
-            result.skipped += 1
+            scan.skipped += 1
             continue
         if cwd_matches is None and rec.get("cwd"):
             cwd_matches = is_under(_real(str(rec["cwd"])), project)
         entrypoints.add(str(rec.get("entrypoint")))
         # Claude Code names each transcript after its session ID
-        _tally(pending, _claude_outcome(rec, path.stem), found)
+        _tally(scan, _claude_outcome(rec, path.stem), scan.utterances)
+    return scan, cwd_matches, entrypoints
+
+
+def _load_claude_file(path: Path, project: str, result: LoadResult, include_non_interactive: bool,
+                      own_dir: bool) -> None:
+    scan, cwd_matches, entrypoints = _scan_claude_file(path, project)
+    if cwd_matches is None and own_dir:
+        # Nothing says where this session ran, so none of it can be attributed or cited
+        result.skipped += scan.skipped + len(scan.utterances)
     # Sibling projects share directory-name prefixes, so a session counts only when its cwd is inside the project
     if not cwd_matches:
         return
     if any(e.startswith("sdk") for e in entrypoints) and not include_non_interactive:
         result.excluded_sessions += 1
         return
-    result.excluded += pending.excluded
-    result.skipped += pending.skipped
-    result.utterances.extend(found)
+    result.excluded += scan.excluded
+    result.skipped += scan.skipped
+    result.utterances.extend(scan.utterances)
 
 
 def _claude_dirs(root: Path, names: Sequence[str]) -> List[Path]:
@@ -207,18 +216,24 @@ def _claude_dirs(root: Path, names: Sequence[str]) -> List[Path]:
     for name in names:
         if len(name) <= CLAUDE_NAME_LIMIT:
             dirs.add(root / name)
-        dirs.update(root.glob(name[:CLAUDE_NAME_LIMIT] + "-*"))
+        dirs.update(root.glob(_subdir_pattern(name)))
     return sorted(dirs)
+
+
+def _subdir_pattern(name: str) -> str:
+    # "/" encodes to "-", and its subdirectories start with a single "-"
+    return name[:CLAUDE_NAME_LIMIT].rstrip("-") + "-*"
 
 
 def load_claude(project: str, home: Path, result: LoadResult, include_non_interactive: bool) -> None:
     real = _real(project)
     names = sorted({encode_project(os.path.abspath(os.path.expanduser(project))), encode_project(real)})
     root = home / "projects"
-    result.searched.extend(str(root / name[:CLAUDE_NAME_LIMIT]) for name in names)
+    result.searched.extend(str(root / (name if len(name) <= CLAUDE_NAME_LIMIT else _subdir_pattern(name)))
+                           for name in names)
     for directory in _claude_dirs(root, names):
         for path in sorted(directory.glob("*.jsonl")):
-            _load_claude_file(path, real, result, include_non_interactive)
+            _load_claude_file(path, real, result, include_non_interactive, directory.name in names)
 
 
 def _codex_texts(rec: dict) -> List[str]:
@@ -273,7 +288,8 @@ def load_codex(project: str, home: Path, result: LoadResult, include_non_interac
         _load_codex_file(path, real, result, include_non_interactive)
 
 
-def _dedup(utterances: Sequence[Utterance]) -> List[Utterance]:
+def dedup(utterances: Sequence[Utterance]) -> List[Utterance]:
+    """Keep one copy of each record; verification must still see every copy, so only extraction calls this."""
     seen = set()
     out = []
     for u in utterances:
@@ -291,7 +307,7 @@ def load(project: str, sources: Sequence[str] = SOURCES, claude_home: Optional[P
         load_claude(project, claude_home or default_claude_home(), result, include_non_interactive)
     if "codex" in sources:
         load_codex(project, codex_home or default_codex_home(), result, include_non_interactive)
-    result.utterances = _dedup(sorted(result.utterances, key=lambda u: (u.ts, u.tool, u.session)))
+    result.utterances = sorted(result.utterances, key=lambda u: (u.ts, u.tool, u.session))
     return result
 
 

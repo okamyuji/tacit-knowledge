@@ -107,6 +107,7 @@ class ClaudeTest(HistoryTestCase):
         result = self.load()
         self.assertEqual((self.texts(result), result.skipped), (["残る"], 1))
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root can read files with mode 000")
     def test_counts_unreadable_file_as_skipped(self):
         path = fx.write_claude(self.claude, PROJECT, [fx.claude_user("読めない")], session="locked")
         path.chmod(0)
@@ -119,12 +120,39 @@ class ClaudeTest(HistoryTestCase):
         fx.write_claude(self.claude, PROJECT, [fx.claude_user("Caveat: this API is flaky, retry twice")])
         self.assertEqual(self.texts(self.load()), ["Caveat: this API is flaky, retry twice"])
 
-    def test_reads_forked_copy_of_a_record_once(self):
-        rec = fx.claude_user("一度だけ", uuid="11111111-2222-3333-4444-555555555555")
-        fx.write_claude(self.claude, PROJECT, [rec], session="b-fork")
-        fx.write_claude(self.claude, PROJECT, [dict(rec, sessionId="a-orig")], session="a-orig")
+    def test_load_keeps_every_copy_of_a_forked_record(self):
+        rec = fx.claude_user("複製", uuid="11111111-2222-3333-4444-555555555555")
+        fx.write_claude(self.claude, PROJECT, [rec], session="b-copy")
+        fx.write_claude(self.claude, PROJECT, [rec], session="a-copy")
+        self.assertEqual([u.session for u in self.load().utterances], ["a-copy", "b-copy"])
+
+    def test_dedup_keeps_one_copy_of_a_forked_record(self):
+        rec = fx.claude_user("複製", uuid="11111111-2222-3333-4444-555555555555")
+        fx.write_claude(self.claude, PROJECT, [rec], session="b-copy")
+        fx.write_claude(self.claude, PROJECT, [rec], session="a-copy")
+        self.assertEqual([u.session for u in history.dedup(self.load().utterances)], ["a-copy"])
+
+    def test_does_not_count_broken_lines_of_a_neighbouring_project(self):
+        fx.write_claude(self.claude, "/proj-x", [fx.claude_user("隣", cwd="/proj-x")], raw_lines=["{", "{"])
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user("自分")], session="own")
         result = self.load()
-        self.assertEqual([(u.session, u.text) for u in result.utterances], [("a-orig", "一度だけ")])
+        self.assertEqual((self.texts(result), result.skipped), (["自分"], 0))
+
+    def test_counts_human_records_of_a_file_without_cwd_as_skipped(self):
+        rec = fx.claude_user("どこで打ったか分からない")
+        del rec["cwd"]
+        fx.write_claude(self.claude, PROJECT, [rec])
+        result = self.load()
+        self.assertEqual((result.utterances, result.skipped), ([], 1))
+
+    def test_reads_sessions_below_the_root_directory(self):
+        fx.write_claude(self.claude, "/proj/sub", [fx.claude_user("ルート配下", cwd="/proj/sub")])
+        self.assertEqual(self.texts(self.load(project="/")), ["ルート配下"])
+
+    def test_lists_search_pattern_for_shortened_names(self):
+        project = "/" + "a" * 250
+        expected = self.claude / "projects" / (history.encode_project(project)[:200] + "-*")
+        self.assertIn(str(expected), self.load(project=project).searched)
 
     def test_keeps_same_text_from_records_with_different_uuids(self):
         fx.write_claude(self.claude, PROJECT, [fx.claude_user("同じ", uuid="u1")], session="s1")
@@ -133,13 +161,35 @@ class ClaudeTest(HistoryTestCase):
 
     def test_ignores_uuid_that_is_not_a_string(self):
         fx.write_claude(self.claude, PROJECT, [fx.claude_user("一つ目", uuid=7), fx.claude_user("二つ目", uuid=7)])
-        self.assertEqual(self.texts(self.load()), ["一つ目", "二つ目"])
+        self.assertEqual([u.text for u in history.dedup(self.load().utterances)], ["一つ目", "二つ目"])
+
+    def test_dedup_keeps_distinct_codex_utterances(self):
+        fx.write_codex(self.codex, [fx.codex_meta(), fx.codex_user("一つ目"), fx.codex_user("二つ目")])
+        self.assertEqual([u.text for u in history.dedup(self.load().utterances)], ["一つ目", "二つ目"])
+
+    def test_sums_skipped_records_across_files(self):
+        for i in range(2):
+            fx.write_claude(self.claude, PROJECT, [fx.claude_user(f"発話{i}")], session=f"s{i}", raw_lines=["{"])
+        self.assertEqual(self.load().skipped, 2)
+
+    def test_sums_skipped_records_of_files_without_cwd(self):
+        for i in range(2):
+            rec = fx.claude_user(f"cwdなし{i}")
+            del rec["cwd"]
+            fx.write_claude(self.claude, PROJECT, [rec], session=f"s{i}")
+        self.assertEqual(self.load().skipped, 2)
+
+    def test_reads_subdirectory_sessions_of_a_project_ending_in_x(self):
+        fx.write_claude(self.claude, "/projX/sub", [fx.claude_user("配下", cwd="/projX/sub")])
+        self.assertEqual(self.texts(self.load(project="/projX")), ["配下"])
 
     def test_reads_project_whose_directory_name_is_exactly_at_the_limit(self):
         project = "/" + "a" * 199
         self.assertEqual(len(history.encode_project(project)), history.CLAUDE_NAME_LIMIT)
         fx.write_claude(self.claude, project, [fx.claude_user("ちょうど200字", cwd=project)])
-        self.assertEqual(self.texts(self.load(project=project)), ["ちょうど200字"])
+        result = self.load(project=project)
+        self.assertEqual(self.texts(result), ["ちょうど200字"])
+        self.assertIn(str(self.claude / "projects" / history.encode_project(project)), result.searched)
 
     def test_reads_sessions_started_in_a_subdirectory(self):
         fx.write_claude(self.claude, "/proj/sub", [fx.claude_user("配下で起動", cwd="/proj/sub")])
@@ -346,14 +396,14 @@ class CommonTest(HistoryTestCase):
             fx.claude_user("同じ", ts="2026-09-24T01:05:59.000Z"),
             fx.claude_user("同じ", ts="2026-09-24T01:06:00.000Z"),
         ])
-        self.assertEqual(self.texts(self.load()), ["同じ", "同じ"])
+        self.assertEqual([u.text for u in history.dedup(self.load().utterances)], ["同じ", "同じ"])
 
     def test_merges_duplicates_with_fractional_seconds(self):
         fx.write_claude(self.claude, PROJECT, [
             fx.claude_user("同じ", ts="2026-09-24T01:05:01.250Z"),
             fx.claude_user("同じ", ts="2026-09-24T01:05:59.750Z"),
         ])
-        self.assertEqual(self.texts(self.load()), ["同じ"])
+        self.assertEqual([u.text for u in history.dedup(self.load().utterances)], ["同じ"])
 
     def test_load_or_report_reads_only_requested_sources_and_reports_paths(self):
         fx.write_claude(self.claude, PROJECT, [fx.claude_user("claude だけ")])

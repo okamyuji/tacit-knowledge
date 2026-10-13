@@ -70,7 +70,7 @@ python3 skills/tacit-knowledge/scripts/verify.py ~/notes/tacit/tacit-knowledge.m
 | `--chunk-chars N` | Maximum characters per output file of `extract.py`. Defaults to 20000. |
 | `--include-non-interactive` | Also read non-interactive sessions (see below). Pass it to both scripts. |
 
-Exit codes are 0 for success, 1 when `verify.py` finds an evidence line that is missing from the history or malformed, a claim without evidence, or no evidence lines at all, and 2 when no history is found, an input cannot be read, or an argument is wrong.
+Exit codes are 0 for success, 1 when `verify.py` finds an evidence line that is missing from the history or malformed, a claim without evidence, or no evidence lines at all, and 2 when no history is found, an input cannot be read, the output cannot be written, or an argument is wrong.
 
 ## What is left out
 

@@ -112,10 +112,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if result is None:
         return 2
     total = sum(1 for line in lines if parse_evidence(line))
-    if total == 0:
+    bad, unsupported, malformed = verify(lines, build_index(result.utterances))
+    if total == 0 and not malformed:
         print("no evidence lines found; check the line format in the docstring of verify.py")
         return 1
-    bad, unsupported, malformed = verify(lines, build_index(result.utterances))
     _report(total, bad, unsupported, malformed)
     return 1 if bad or unsupported or malformed else 0
 

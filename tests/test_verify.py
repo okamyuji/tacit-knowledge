@@ -136,6 +136,20 @@ class MainTest(unittest.TestCase):
             self.assertEqual(verify.main([str(self.doc), "--project", "/proj"]), 2)
             self.assertEqual(verify.main([str(self.doc), "--project", "/proj", "--include-non-interactive"]), 0)
 
+    def test_verifies_evidence_from_either_copy_of_a_forked_record(self):
+        rec = fx.claude_user("どちらの複製でも通る", uuid="11111111-2222-3333-4444-555555555555")
+        fx.write_claude(self.claude, "/proj", [rec], session="bbbbbbbb-0000")
+        fx.write_claude(self.claude, "/proj", [rec], session="aaaaaaaa-0000")
+        line = "  > 2026-09-24 10:05+09:00 bbbbbbbb-000「どちらの複製でも通る」"
+        code, stdout, _ = self.run_main(f"- 主張\n{line}\n")
+        self.assertEqual(code, 0, stdout)
+
+    def test_prints_malformed_lines_when_no_line_is_valid_evidence(self):
+        self.write_history()
+        code, stdout, _ = self.run_main("- 主張\n  > 2026-09-24 10:05 45c391e1-2c4「オフセットなし」\n")
+        self.assertEqual(code, 1)
+        self.assertIn("NG malformed evidence line (line 2)", stdout)
+
     def test_returns_1_when_document_has_no_evidence_lines(self):
         self.write_history()
         code, stdout, _ = self.run_main("# 見出しだけの文書\n")

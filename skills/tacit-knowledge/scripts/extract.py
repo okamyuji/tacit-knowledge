@@ -2,6 +2,7 @@
 """Write the human utterances of a project's Claude Code / Codex history into chunked text files.
 
 usage: extract.py --out DIR [--project PATH] [--source claude,codex] [--tz ZONE] [--chunk-chars N]
+                  [--include-non-interactive]
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from datetime import tzinfo
 from pathlib import Path
 from typing import List, Optional, Sequence
 
-from history import SOURCES, Utterance, format_ts, load_or_report, parse_sources, resolve_tz, session_prefix
+from history import SOURCES, Utterance, dedup, format_ts, load_or_report, parse_sources, resolve_tz, session_prefix
 
 DEFAULT_CHUNK_CHARS = 20000
 
@@ -75,7 +76,7 @@ def _write_chunks(out: Path, chunks: List[List[str]]) -> None:
         finally:
             os.umask(previous)
     for stale in out.glob("prompts-*.txt"):
-        if re.fullmatch(r"prompts-\d{3,}\.txt", stale.name):
+        if re.fullmatch(r"prompts-[0-9]{3,}\.txt", stale.name):
             stale.unlink()
     for i, blocks in enumerate(chunks, 1):
         fd = os.open(out / f"prompts-{i:03d}.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -90,7 +91,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
     if in_git_worktree(args.out.resolve()):
         print(f"warning: {args.out} is inside a git worktree; do not commit these files", file=sys.stderr)
-    utts = result.utterances
+    utts = dedup(result.utterances)
     chunks = chunk([render(u, args.zone) for u in utts], args.chunk_chars)
     try:
         _write_chunks(args.out, chunks)
