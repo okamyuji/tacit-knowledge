@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check that every evidence line of a tacit-knowledge document quotes a real utterance.
 
-usage: verify.py DOC [--project PATH] [--source claude,codex]
+usage: verify.py DOC [--project PATH] [--source claude,codex] [--include-non-interactive]
 
 An evidence line looks like `  > 2026-09-24 10:05+09:00 45c391e1-2c4「quoted text」`.
 A claim is a top-level `- ` bullet and needs at least one evidence line below it.

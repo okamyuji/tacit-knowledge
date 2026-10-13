@@ -197,7 +197,8 @@ def _load_claude_file(path: Path, project: str, result: LoadResult, include_non_
                       own_dir: bool) -> None:
     scan, cwd_matches, entrypoints = _scan_claude_file(path, project)
     if cwd_matches is None and own_dir:
-        # Nothing says where this session ran, so none of it can be attributed or cited
+        # shortcut: a file whose cwd cannot be read is attributed by directory name, which is lossy; it is counted only
+        # in the project's exact directory (not shortened, subdirectory, or colliding names). The count is informational.
         result.skipped += scan.skipped + len(scan.utterances)
     # Sibling projects share directory-name prefixes, so a session counts only when its cwd is inside the project
     if not cwd_matches:
@@ -229,8 +230,10 @@ def load_claude(project: str, home: Path, result: LoadResult, include_non_intera
     real = _real(project)
     names = sorted({encode_project(os.path.abspath(os.path.expanduser(project))), encode_project(real)})
     root = home / "projects"
-    result.searched.extend(str(root / (name if len(name) <= CLAUDE_NAME_LIMIT else _subdir_pattern(name)))
-                           for name in names)
+    for name in names:
+        if len(name) <= CLAUDE_NAME_LIMIT:
+            result.searched.append(str(root / name))
+        result.searched.append(str(root / _subdir_pattern(name)))
     for directory in _claude_dirs(root, names):
         for path in sorted(directory.glob("*.jsonl")):
             _load_claude_file(path, real, result, include_non_interactive, directory.name in names)

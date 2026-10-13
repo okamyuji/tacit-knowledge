@@ -145,6 +145,16 @@ class ClaudeTest(HistoryTestCase):
         result = self.load()
         self.assertEqual((result.utterances, result.skipped), ([], 1))
 
+    def test_ignores_file_without_cwd_outside_the_projects_own_directory(self):
+        rec = fx.claude_user("どこの発話か分からない")
+        del rec["cwd"]
+        fx.write_claude(self.claude, "/proj/sub", [rec], raw_lines=["{"])
+        result = self.load()
+        self.assertEqual((result.utterances, result.skipped), ([], 0))
+
+    def test_lists_subdirectory_search_pattern(self):
+        self.assertIn(str(self.claude / "projects" / "-proj-*"), self.load().searched)
+
     def test_reads_sessions_below_the_root_directory(self):
         fx.write_claude(self.claude, "/proj/sub", [fx.claude_user("ルート配下", cwd="/proj/sub")])
         self.assertEqual(self.texts(self.load(project="/")), ["ルート配下"])

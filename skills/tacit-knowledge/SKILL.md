@@ -39,7 +39,7 @@ Copy the time and the session prefix from the `===` header of the utterance in t
    ```
 
    Options: `--source claude` or `--source codex` to read one tool, `--tz Asia/Tokyo` to change the time zone, `--chunk-chars N` to change the file size (default 20000). Non-interactive sessions are skipped by default; if the user types prompts into `claude -p` or `codex exec` by hand, add `--include-non-interactive` here and in step 6. Exit code 2 means no history was found; show the searched paths it printed and ask the user for the right project directory.
-3. Read every `prompts-*.txt` file completely, in numeric order. For each file, write down candidate items with their evidence lines before moving on. Do not skim; a criterion often appears once per file.
+3. Read every numbered file the extractor wrote (`prompts-001.txt` onward; the `files:` line gives the count) completely, in numeric order. For each file, write down candidate items with their evidence lines before moving on. Do not skim; a criterion often appears once per file.
 4. Merge the candidates into the four sections. Combine items that say the same thing and keep their evidence lines together.
 5. Write the document to `<output dir>/tacit-knowledge.md` unless the user named another path.
 6. Run the verifier:
