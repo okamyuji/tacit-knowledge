@@ -85,7 +85,7 @@ Exit codes are 0 for success, 1 when `verify.py` finds an evidence line that is 
 
 ## Privacy
 
-The extracted files and the document contain your raw prompts, which may include secrets or customer data. The extractor writes files with mode `0600`, creates new output directories with mode `0700`, and refuses a directory inside a git worktree or one that other users can write to. Keep the output and the document outside any repository and do not share them. The prompt files can contain text you once pasted, such as web pages or logs; the skill tells the agent to treat them as data, and you should keep your agent's permission prompts on while it runs.
+The extracted files and the document contain your raw prompts, which may include secrets or customer data. The extractor writes files with mode `0600`, creates new output directories with mode `0700`, and refuses a directory inside a git worktree, one owned by another user, or one that other users can write to. The agent writes the document into the same directory. Keep the output and the document outside any repository and do not share them. The prompt files can contain text you once pasted, such as web pages or logs; the skill tells the agent to treat them as data, and you should keep your agent's permission prompts on while it runs.
 
 ## Development
 
