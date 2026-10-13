@@ -8,6 +8,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import fixtures as fx
@@ -90,7 +91,53 @@ class WalkTest(unittest.TestCase):
         out = self.root / "out"
         with mock.patch.object(extract, "walk", return_value=self.root / "other"):
             with self.assertRaisesRegex(OSError, "changed while it was being created"):
-                extract._prepare_dir(out)
+                extract._prepare_dir(self.root, ["out"])
+
+    def test_splits_existing_part_from_missing_names(self):
+        self.assertEqual(extract.walk_split(self.root / "a" / "b"), (self.root, ["a", "b"]))
+
+    def test_refuses_parent_reference_after_a_missing_directory(self):
+        (self.root / "real").mkdir()
+        (self.root / "link").symlink_to("nonexistent/../real")
+        with self.assertRaisesRegex(OSError, "'..' after a missing directory"):
+            extract.walk(self.root / "link" / "out")
+
+
+class PrivateGroupTest(unittest.TestCase):
+    ME = SimpleNamespace(pw_name="dev", pw_uid=os.getuid(), pw_gid=1001)
+
+    def check(self, group, users=()):
+        with mock.patch("grp.getgrgid", return_value=group), mock.patch("pwd.getpwuid", return_value=self.ME), \
+                mock.patch("pwd.getpwall", return_value=[self.ME, *users]):
+            return extract._private_group(1001)
+
+    def test_accepts_group_named_after_the_user_with_no_other_member(self):
+        self.assertTrue(self.check(SimpleNamespace(gr_name="dev", gr_mem=[])))
+        self.assertTrue(self.check(SimpleNamespace(gr_name="dev", gr_mem=["dev"])))
+
+    def test_refuses_group_with_another_member(self):
+        self.assertFalse(self.check(SimpleNamespace(gr_name="dev", gr_mem=["dev", "eve"])))
+
+    def test_refuses_group_named_otherwise(self):
+        self.assertFalse(self.check(SimpleNamespace(gr_name="staff", gr_mem=[])))
+
+    def test_refuses_group_that_is_another_users_primary_group(self):
+        eve = SimpleNamespace(pw_name="eve", pw_uid=os.getuid() + 1, pw_gid=1001)
+        self.assertFalse(self.check(SimpleNamespace(gr_name="dev", gr_mem=[]), [eve]))
+
+    def test_refuses_unknown_group(self):
+        with mock.patch("grp.getgrgid", side_effect=KeyError(1001)):
+            self.assertFalse(extract._private_group(1001))
+
+    def test_looks_up_groups_only_when_group_bits_are_set(self):
+        st = os.stat_result((stat.S_IFDIR | 0o705, 0, 0, 0, 0, 1001, 0, 0, 0, 0))
+        with mock.patch.object(extract, "_private_group") as private:
+            self.assertEqual(extract._others_bits(st, 0o077), 0o005)
+        private.assert_not_called()
+
+    def test_refuses_on_a_platform_without_uids(self):
+        with mock.patch.object(extract, "os", SimpleNamespace(path=os.path)):
+            self.assertFalse(extract._private_group(1001))
 
 
 class MainTest(unittest.TestCase):
@@ -319,6 +366,43 @@ class MainTest(unittest.TestCase):
         self.assertFalse(self.out.exists())
         shared.chmod(0o1777)
         self.assertEqual(self.run_main()[0], 0)
+
+    def test_accepts_group_access_when_the_group_is_private(self):
+        self.write_history()
+        shared = self.root / "shared"
+        shared.mkdir()
+        shared.chmod(0o775)
+        self.out = shared / "out"
+        self.out.mkdir()
+        self.out.chmod(0o770)
+        with mock.patch.object(extract, "_private_group", return_value=True):
+            self.assertEqual(self.run_main()[0], 0)
+            self.out.chmod(0o705)
+            code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("is accessible to other users", stderr)
+        self.out.chmod(0o770)
+        with mock.patch.object(extract, "_private_group", return_value=False):
+            code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn(f"{shared.resolve()} is writable by other users", stderr)
+
+    def test_refuses_name_planted_after_the_path_was_checked(self):
+        self.write_history()
+        victim = self.root / "victim"
+        victim.mkdir(mode=0o700)
+        self.out = self.root / "a" / "out"
+        real_dedup = extract.dedup
+
+        def planting_dedup(utts):
+            os.symlink(victim, self.root / "a")
+            return real_dedup(utts)
+
+        with mock.patch.object(extract, "dedup", side_effect=planting_dedup):
+            code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("appeared while the output directory was being created", stderr)
+        self.assertEqual(list(victim.iterdir()), [])
 
     def test_refuses_sticky_output_directory_writable_by_others(self):
         self.write_history()

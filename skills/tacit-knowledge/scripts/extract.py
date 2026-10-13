@@ -13,7 +13,7 @@ import stat
 import sys
 from datetime import tzinfo
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 from history import SOURCES, Utterance, dedup, format_ts, load_or_report, parse_sources, resolve_tz, session_prefix
 
@@ -77,6 +77,28 @@ def _owned_by_other(st: os.stat_result) -> bool:
     return hasattr(os, "getuid") and st.st_uid not in (0, os.getuid())
 
 
+def _private_group(gid: int) -> bool:
+    """True for a group of the user's own, which Ubuntu and others pair with umask 002: its bits let no one else in."""
+    if not hasattr(os, "getuid"):
+        return False
+    import grp
+    import pwd
+    try:
+        group, me = grp.getgrgid(gid), pwd.getpwuid(os.getuid())
+    except KeyError:
+        return False
+    return (group.gr_name == me.pw_name and set(group.gr_mem) <= {me.pw_name}
+            # shortcut: getpwall() sees only enumerable users (local files; LDAP only with enumeration on), check the
+            # group's members another way if a directory service hides users
+            and not any(p.pw_gid == gid and p.pw_uid != me.pw_uid for p in pwd.getpwall()))
+
+
+def _others_bits(st: os.stat_result, bits: int) -> int:
+    """`bits` of the group and others, leaving out the group's when the group is the user's own."""
+    group, other = st.st_mode & bits & 0o070, st.st_mode & bits & 0o007
+    return other | (group if group and not _private_group(st.st_gid) else 0)
+
+
 def _check_entry(entry: Path, st: os.stat_result) -> None:
     if _owned_by_other(st):
         raise OSError(f"{entry} is owned by another user")
@@ -84,16 +106,16 @@ def _check_entry(entry: Path, st: os.stat_result) -> None:
         return
     if not stat.S_ISDIR(st.st_mode):
         raise OSError(f"{entry} is not a directory")
-    if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
+    if _others_bits(st, 0o022) and not st.st_mode & stat.S_ISVTX:
         raise OSError(f"{entry} is writable by other users")
 
 
-def walk(path: Path) -> Path:
+def walk_split(path: Path) -> Tuple[Path, List[str]]:
     """Resolve an absolute path one entry at a time, refusing anything another user could swap.
 
     Every entry must belong to the user or root, and every directory must be writable only by them unless
     it is sticky, where others cannot rename or remove our entries. What passes cannot change under us.
-    Returns the real path; missing trailing parts are appended unchecked.
+    Returns the real path of the part that exists and the names below it that do not.
     """
     current, parts, links = Path(path.anchor), list(path.parts[1:]), 0
     while parts:
@@ -105,7 +127,10 @@ def walk(path: Path) -> Path:
         try:
             st = entry.lstat()
         except FileNotFoundError:
-            return entry.joinpath(*parts)
+            missing = [name, *parts]
+            if ".." in missing:
+                raise OSError(f"{path} has '..' after a missing directory") from None
+            return current, missing
         _check_entry(entry, st)
         if stat.S_ISLNK(st.st_mode):
             links += 1
@@ -116,7 +141,12 @@ def walk(path: Path) -> Path:
             current, parts = Path(target.anchor), list(target.parts[1:]) + parts
             continue
         current = entry
-    return current
+    return current, []
+
+
+def walk(path: Path) -> Path:
+    existing, missing = walk_split(path)
+    return existing.joinpath(*missing)
 
 
 def check_name(path: Path) -> None:
@@ -125,23 +155,26 @@ def check_name(path: Path) -> None:
         raise OSError(f"{path!r} contains a quote or a control character")
 
 
-def _prepare_dir(out: Path) -> None:
-    """`out` comes from walk(); walk it again after creating it, since another user may have raced us."""
-    # One level at a time: mkdir never follows a symlink at the name it creates, so a name planted after
-    # walk() makes it fail instead of creating a directory wherever that symlink points
-    for missing in [p for p in (*reversed(out.parents), out) if not os.path.lexists(p)]:
+def _prepare_dir(existing: Path, missing: List[str]) -> Path:
+    """Create the names walk_split() found missing, then walk again, since another user may have raced us."""
+    out = existing.joinpath(*missing)
+    # One level at a time, from the list taken when the path was checked: mkdir never follows a symlink at the
+    # name it creates, so a name planted since then makes it fail instead of creating where that symlink points
+    for i in range(1, len(missing) + 1):
+        level = existing.joinpath(*missing[:i])
         try:
-            os.mkdir(missing, 0o700)
+            os.mkdir(level, 0o700)
         except FileExistsError:
-            raise OSError(f"{missing} appeared while the output directory was being created") from None
+            raise OSError(f"{level} appeared while the output directory was being created") from None
     if walk(out) != out:
         raise OSError(f"{out} changed while it was being created")
     st = out.lstat()
     if hasattr(os, "getuid") and st.st_uid != os.getuid():
         raise OSError(f"{out} is owned by another user")
     # The agent's editor may save through a temporary file, so others must not even list or read this directory
-    if st.st_mode & 0o077:
+    if _others_bits(st, 0o077):
         raise OSError(f"{out} is accessible to other users; run chmod 700 on it or choose another directory")
+    return out
 
 
 def _prepare_document(out: Path) -> Path:
@@ -158,7 +191,6 @@ def _prepare_document(out: Path) -> Path:
 
 
 def _write_chunks(out: Path, chunks: List[List[str]]) -> None:
-    _prepare_dir(out)
     for stale in out.glob("prompts-*.txt"):
         if re.fullmatch(r"prompts-[0-9]{3,}\.txt", stale.name):
             stale.unlink()
@@ -176,7 +208,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if result is None:
         return 2
     try:
-        out = walk(args.out)
+        existing, missing = walk_split(args.out)
+        out = existing.joinpath(*missing)
         check_name(out)
     except OSError as e:
         print(f"refusing output directory {args.out}: {e}", file=sys.stderr)
@@ -187,7 +220,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     utts = dedup(result.utterances)
     chunks = chunk([render(u, args.zone) for u in utts], args.chunk_chars)
     try:
-        _write_chunks(out, chunks)
+        _write_chunks(_prepare_dir(existing, missing), chunks)
         doc = _prepare_document(out)
     except OSError as e:
         print(f"cannot write to {out}: {e}", file=sys.stderr)
