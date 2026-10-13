@@ -143,12 +143,21 @@ class MainTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE((self.out / "prompts-001.txt").stat().st_mode), 0o600)
 
-    def test_keeps_permissions_of_existing_output_directory(self):
+    def test_refuses_existing_output_directory_others_can_open(self):
         self.write_history()
         self.out.mkdir()
-        self.out.chmod(0o755)
-        self.run_main()
-        self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), 0o755)
+        for mode in (0o755, 0o750, 0o701):
+            self.out.chmod(mode)
+            code, _, stderr = self.run_main()
+            self.assertEqual(code, 2, oct(mode))
+            self.assertIn("is accessible to other users; run chmod 700 on it", stderr)
+            self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), mode)
+            self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_accepts_existing_private_output_directory(self):
+        self.write_history()
+        self.out.mkdir(mode=0o700)
+        self.assertEqual(self.run_main()[0], 0)
         self.assertEqual(stat.S_IMODE((self.out / "prompts-001.txt").stat().st_mode), 0o600)
 
     def test_returns_2_when_output_path_is_a_file(self):
@@ -166,7 +175,7 @@ class MainTest(unittest.TestCase):
 
     def test_removes_stale_prompt_files_but_keeps_other_files(self):
         self.write_history()
-        self.out.mkdir()
+        self.out.mkdir(mode=0o700)
         (self.out / "prompts-009.txt").write_text("old", encoding="utf-8")
         (self.out / "notes.md").write_text("keep", encoding="utf-8")
         (self.out / "prompts-v2.txt").write_text("keep", encoding="utf-8")
@@ -268,7 +277,7 @@ class MainTest(unittest.TestCase):
 
     def test_refuses_existing_directory_owned_by_another_user(self):
         self.write_history()
-        self.out.mkdir(mode=0o755)
+        self.out.mkdir(mode=0o700)
         with mock.patch.object(extract.os, "getuid", return_value=os.getuid() + 1):
             code, _, stderr = self.run_main()
         self.assertEqual(code, 2)
@@ -317,7 +326,7 @@ class MainTest(unittest.TestCase):
         self.out.chmod(0o1777)
         code, _, stderr = self.run_main()
         self.assertEqual(code, 2)
-        self.assertIn("writable by other users", stderr)
+        self.assertIn("is accessible to other users", stderr)
 
     def test_resolves_symlinked_output_directory_and_prints_real_path(self):
         self.write_history()
@@ -384,6 +393,52 @@ class MainTest(unittest.TestCase):
         doc = self.out / "tacit-knowledge.md"
         self.assertEqual((doc.read_text(encoding="utf-8"), stat.S_IMODE(doc.stat().st_mode)), ("", 0o600))
 
+    def test_refuses_name_planted_while_creating_the_output_directory(self):
+        self.write_history()
+        victim = self.root / "victim"
+        victim.mkdir(mode=0o700)
+        self.out = self.root / "a" / "out"
+        real_mkdir = os.mkdir
+
+        def racing_mkdir(path, *args, **kwargs):
+            if not os.path.lexists(self.root / "a"):
+                os.symlink(victim, self.root / "a")
+            return real_mkdir(path, *args, **kwargs)
+
+        with mock.patch.object(extract.os, "mkdir", side_effect=racing_mkdir):
+            code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("appeared while the output directory was being created", stderr)
+        self.assertEqual(list(victim.iterdir()), [])
+
+    def test_refuses_document_with_another_hard_link(self):
+        self.write_history()
+        self.out.mkdir(mode=0o700)
+        other = self.root / "other.txt"
+        other.write_text("keep", encoding="utf-8")
+        other.chmod(0o644)
+        os.link(other, self.out / "tacit-knowledge.md")
+        code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("is not a regular file of yours with a single link", stderr)
+        self.assertEqual(stat.S_IMODE(other.stat().st_mode), 0o644)
+
+    def test_refuses_document_owned_by_another_user(self):
+        self.write_history()
+        self.out.mkdir(mode=0o700)
+        doc = self.out / "tacit-knowledge.md"
+        doc.write_text("", encoding="utf-8")
+        real_lstat = Path.lstat
+        foreign = os.stat_result((stat.S_IFREG | 0o644, 0, 0, 1, os.getuid() + 1, 0, 0, 0, 0, 0))
+
+        def fake_lstat(path):
+            return foreign if path.name == "tacit-knowledge.md" else real_lstat(path)
+
+        with mock.patch.object(extract.Path, "lstat", autospec=True, side_effect=fake_lstat):
+            code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("is not a regular file of yours with a single link", stderr)
+
     def test_keeps_existing_document_and_makes_it_private(self):
         self.write_history()
         self.out.mkdir(mode=0o700)
@@ -402,11 +457,11 @@ class MainTest(unittest.TestCase):
         (self.out / "tacit-knowledge.md").symlink_to(target)
         code, _, stderr = self.run_main()
         self.assertEqual(code, 2)
-        self.assertIn("is not a regular file", stderr)
+        self.assertIn("is not a regular file of yours with a single link", stderr)
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
 
     def test_does_not_follow_a_symlink_at_an_output_name(self):
-        self.out.mkdir()
+        self.out.mkdir(mode=0o700)
         victim = self.root / "victim.txt"
         victim.write_text("keep", encoding="utf-8")
         (self.out / "prompts-001.txt").symlink_to(victim)

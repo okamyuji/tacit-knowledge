@@ -127,20 +127,21 @@ def check_name(path: Path) -> None:
 
 def _prepare_dir(out: Path) -> None:
     """`out` comes from walk(); walk it again after creating it, since another user may have raced us."""
-    # mkdir(parents=True) ignores mode for the parents it creates, but honours the umask
-    previous = os.umask(0o077)
-    try:
-        out.mkdir(parents=True, exist_ok=True)
-    finally:
-        os.umask(previous)
+    # One level at a time: mkdir never follows a symlink at the name it creates, so a name planted after
+    # walk() makes it fail instead of creating a directory wherever that symlink points
+    for missing in [p for p in (*reversed(out.parents), out) if not os.path.lexists(p)]:
+        try:
+            os.mkdir(missing, 0o700)
+        except FileExistsError:
+            raise OSError(f"{missing} appeared while the output directory was being created") from None
     if walk(out) != out:
         raise OSError(f"{out} changed while it was being created")
     st = out.lstat()
-    # The leaf is held to stricter rules than its parents; an existing one keeps its mode
     if hasattr(os, "getuid") and st.st_uid != os.getuid():
         raise OSError(f"{out} is owned by another user")
-    if st.st_mode & 0o022:
-        raise OSError(f"{out} is writable by other users")
+    # The agent's editor may save through a temporary file, so others must not even list or read this directory
+    if st.st_mode & 0o077:
+        raise OSError(f"{out} is accessible to other users; run chmod 700 on it or choose another directory")
 
 
 def _prepare_document(out: Path) -> Path:
@@ -148,8 +149,9 @@ def _prepare_document(out: Path) -> Path:
     try:
         os.close(os.open(doc, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     except FileExistsError:
-        if not stat.S_ISREG(doc.lstat().st_mode):
-            raise OSError(f"{doc} is not a regular file") from None
+        st = doc.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or (hasattr(os, "getuid") and st.st_uid != os.getuid()):
+            raise OSError(f"{doc} is not a regular file of yours with a single link") from None
         # Only the user can write to `out`, so the file checked above is the one changed here
         doc.chmod(0o600)
     return doc
