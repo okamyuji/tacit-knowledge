@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import stat
 import tempfile
 import unittest
@@ -12,7 +13,7 @@ import fixtures as fx
 import extract
 from history import Utterance
 
-JST = timezone(timedelta(hours=9))
+EST = timezone(timedelta(hours=-5))
 
 
 class ChunkTest(unittest.TestCase):
@@ -29,7 +30,7 @@ class ChunkTest(unittest.TestCase):
 class RenderTest(unittest.TestCase):
     def test_writes_header_with_offset_tool_session_prefix_and_length(self):
         u = Utterance(datetime(2026, 9, 24, 1, 5, 30, tzinfo=timezone.utc), "claude", fx.CLAUDE_SESSION, "本文です")
-        self.assertEqual(extract.render(u, JST), "=== 2026-09-24 10:05+09:00 claude 45c391e1-2c4 (4)\n本文です\n")
+        self.assertEqual(extract.render(u, EST), "=== 2026-09-23 20:05-05:00 claude 45c391e1-2c4 (4)\n本文です\n")
 
 
 class GitWorktreeTest(unittest.TestCase):
@@ -37,6 +38,11 @@ class GitWorktreeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / ".git").mkdir()
             self.assertTrue(extract.in_git_worktree(Path(tmp) / "a" / "b"))
+
+    def test_does_not_treat_other_case_as_git(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".GIT_NOT").mkdir()
+            self.assertFalse(extract.in_git_worktree(Path(tmp) / "out"))
 
     def test_returns_false_outside_git(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -58,26 +64,26 @@ class MainTest(unittest.TestCase):
     def run_main(self, *args):
         stdout, stderr = io.StringIO(), io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
-            code = extract.main(["--out", str(self.out), "--project", "/proj", "--tz", "Asia/Tokyo", *args])
+            code = extract.main(["--out", str(self.out), "--project", "/proj", "--tz", "America/New_York", *args])
         return code, stdout.getvalue(), stderr.getvalue()
 
     def write_history(self):
         fx.write_claude(self.claude, "/proj", [
             fx.claude_user("一つ目の発話", ts="2026-09-24T01:05:30Z"),
             fx.claude_user("<system-reminder>注入</system-reminder>"),
+            fx.claude_user("三つ目の発話", ts="2026-09-26T03:00:00Z"),
         ])
         fx.write_codex(self.codex, [fx.codex_meta(), fx.codex_user("二つ目の発話", ts="2026-09-25T02:00:00Z")])
         fx.write_codex(self.codex, [fx.codex_meta(source="exec"), fx.codex_user("agent")], session="e" * 36)
 
-    def test_writes_prompt_file_with_headers_and_texts(self):
+    def test_writes_prompt_file_with_headers_and_texts_in_time_order(self):
         self.write_history()
         code, _, _ = self.run_main()
         self.assertEqual(code, 0)
-        content = (self.out / "prompts-001.txt").read_text(encoding="utf-8")
-        self.assertIn("=== 2026-09-24 10:05+09:00 claude 45c391e1-2c4 (6)\n一つ目の発話\n", content)
-        self.assertIn("=== 2026-09-25 11:00+09:00 codex 01a12ca3-2e3 (6)\n二つ目の発話\n", content)
-        self.assertNotIn("注入", content)
-        self.assertNotIn("agent", content)
+        self.assertEqual((self.out / "prompts-001.txt").read_text(encoding="utf-8"),
+                         "=== 2026-09-23 21:05-04:00 claude 45c391e1-2c4 (6)\n一つ目の発話\n"
+                         "=== 2026-09-24 22:00-04:00 codex 01a12ca3-2e3 (6)\n二つ目の発話\n"
+                         "=== 2026-09-25 23:00-04:00 claude 45c391e1-2c4 (6)\n三つ目の発話\n")
 
     def test_restricts_permissions_of_output(self):
         self.write_history()
@@ -104,7 +110,7 @@ class MainTest(unittest.TestCase):
         self.write_history()
         code, _, _ = self.run_main("--chunk-chars", "10")
         self.assertEqual(code, 0)
-        self.assertEqual(sorted(p.name for p in self.out.iterdir()), ["prompts-001.txt", "prompts-002.txt"])
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()), ["prompts-001.txt", "prompts-002.txt", "prompts-003.txt"])
 
     def test_removes_stale_prompt_files_but_keeps_other_files(self):
         self.write_history()
@@ -120,10 +126,61 @@ class MainTest(unittest.TestCase):
     def test_prints_counts_period_and_exclusions(self):
         self.write_history()
         _, stdout, _ = self.run_main()
-        self.assertIn("utterances: 2 (claude 1, codex 1)", stdout)
-        self.assertIn("period: 2026-09-24 10:05+09:00 .. 2026-09-25 11:00+09:00", stdout)
-        self.assertIn("excluded: 1 injected texts, 1 non-interactive sessions, 0 unreadable records", stdout)
-        self.assertIn("cleanupPeriodDays", stdout)
+        self.assertEqual(stdout.splitlines(), [
+            "utterances: 3 (claude 2, codex 1)",
+            "period: 2026-09-23 21:05-04:00 .. 2026-09-25 23:00-04:00",
+            "excluded: 1 injected texts, 1 non-interactive sessions, 0 unreadable records",
+            f"files: 1 in {self.out}",
+            "note: Claude Code deletes transcripts older than cleanupPeriodDays (default 30 days).",
+        ])
+
+    def test_creates_missing_parent_directories(self):
+        self.write_history()
+        self.out = self.root / "a" / "b" / "out"
+        code, _, _ = self.run_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), 0o700)
+
+    def test_accepts_chunk_size_of_one(self):
+        self.write_history()
+        code, _, _ = self.run_main("--chunk-chars", "1")
+        self.assertEqual(code, 0)
+
+    def test_uses_current_directory_as_default_project(self):
+        project = self.root / "project"
+        project.mkdir()
+        real = os.path.realpath(project)
+        fx.write_claude(self.claude, real, [fx.claude_user("既定のプロジェクト", cwd=real)])
+        cwd = os.getcwd()
+        os.chdir(project)
+        self.addCleanup(os.chdir, cwd)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(extract.main(["--out", str(self.out)]), 0)
+
+    def test_reads_only_requested_source(self):
+        fx.write_claude(self.claude, "/proj", [fx.claude_user("claude だけ")])
+        code, _, stderr = self.run_main("--source", "codex")
+        self.assertEqual(code, 2)
+        self.assertTrue(stderr.startswith("no utterances found. searched:\n"))
+
+    def test_help_describes_every_option(self):
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, redirect_stdout(stdout):
+            extract.main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+        text = " ".join(stdout.getvalue().split())
+        for phrase in ("Extract human utterances from agent history.", "output directory (do not commit it)",
+                       "project directory (default: current directory)", "comma-separated: claude,codex",
+                       "IANA time zone such as Asia/Tokyo (default: local)", "max characters per file",
+                       "also read claude -p, codex exec, and subagent sessions (usually written by another agent)"):
+            self.assertRegex(text, rf"(^| ){re.escape(phrase)}( |$)")
+
+    def test_requires_out(self):
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(stderr):
+            extract.main(["--project", "/proj"])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("--out", stderr.getvalue())
 
     def test_includes_non_interactive_sessions_when_asked(self):
         self.write_history()
@@ -149,20 +206,21 @@ class MainTest(unittest.TestCase):
         self.assertIn(str(self.codex / "sessions"), stderr)
         self.assertFalse(self.out.exists())
 
-    def test_rejects_unknown_time_zone(self):
-        with self.assertRaises(SystemExit) as cm, redirect_stderr(io.StringIO()):
-            extract.main(["--out", str(self.out), "--tz", "Not/AZone"])
+    def assert_usage_error(self, args, message):
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(stderr):
+            extract.main(["--out", str(self.out), *args])
         self.assertEqual(cm.exception.code, 2)
+        self.assertIn(f"error: {message}\n", stderr.getvalue())
+
+    def test_rejects_unknown_time_zone(self):
+        self.assert_usage_error(["--tz", "Not/AZone"], "unknown time zone: Not/AZone")
 
     def test_rejects_unknown_source(self):
-        with self.assertRaises(SystemExit) as cm, redirect_stderr(io.StringIO()):
-            extract.main(["--out", str(self.out), "--source", "claude,cursor"])
-        self.assertEqual(cm.exception.code, 2)
+        self.assert_usage_error(["--source", "claude,cursor"], "source must be a subset of claude,codex")
 
     def test_rejects_non_positive_chunk_size(self):
-        with self.assertRaises(SystemExit) as cm, redirect_stderr(io.StringIO()):
-            extract.main(["--out", str(self.out), "--chunk-chars", "0"])
-        self.assertEqual(cm.exception.code, 2)
+        self.assert_usage_error(["--chunk-chars", "0"], "--chunk-chars must be positive")
 
 
 if __name__ == "__main__":

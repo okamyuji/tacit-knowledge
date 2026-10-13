@@ -24,19 +24,24 @@ def render(u: Utterance, tz: Optional[tzinfo]) -> str:
 def chunk(blocks: Sequence[str], limit: int) -> List[List[str]]:
     """Split only between blocks: a quote must stay intact to be verifiable."""
     chunks: List[List[str]] = []
-    size = 0
     for block in blocks:
-        if chunks and size + len(block) <= limit:
+        if chunks and sum(map(len, chunks[-1])) + len(block) <= limit:
             chunks[-1].append(block)
-            size += len(block)
         else:
             chunks.append([block])
-            size = len(block)
     return chunks
 
 
+def _has_git(directory: Path) -> bool:
+    # Compare names instead of calling exists(): ".GIT" exists too on case-insensitive file systems
+    try:
+        return ".git" in os.listdir(directory)
+    except OSError:
+        return False
+
+
 def in_git_worktree(path: Path) -> bool:
-    return any((p / ".git").exists() for p in [path, *path.parents])
+    return any(_has_git(p) for p in [path, *path.parents])
 
 
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
@@ -46,7 +51,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument("--source", default=",".join(SOURCES), help="comma-separated: claude,codex")
     parser.add_argument("--include-non-interactive", action="store_true",
                         help="also read claude -p, codex exec, and subagent sessions (usually written by another agent)")
-    parser.add_argument("--tz", default=None, help="IANA time zone such as Asia/Tokyo (default: local)")
+    parser.add_argument("--tz", help="IANA time zone such as Asia/Tokyo (default: local)")
     parser.add_argument("--chunk-chars", type=int, default=DEFAULT_CHUNK_CHARS, help="max characters per file")
     args = parser.parse_args(argv)
     if args.chunk_chars <= 0:
@@ -59,21 +64,17 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     return args
 
 
-def _write_chunks(out: Path, chunks: List[List[str]]) -> List[Path]:
+def _write_chunks(out: Path, chunks: List[List[str]]) -> None:
     # An existing directory belongs to the user, so leave its mode alone; the files are always 0600.
     if not out.is_dir():
-        out.mkdir(mode=0o700, parents=True)
+        out.mkdir(parents=True)
         out.chmod(0o700)
     for stale in out.glob("prompts-[0-9][0-9][0-9].txt"):
         stale.unlink()
-    paths = []
     for i, blocks in enumerate(chunks, 1):
-        path = out / f"prompts-{i:03d}.txt"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("".join(blocks))
-        paths.append(path)
-    return paths
+        fd = os.open(out / f"prompts-{i:03d}.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write("".join(blocks).encode())
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -84,8 +85,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if in_git_worktree(args.out.resolve()):
         print(f"warning: {args.out} is inside a git worktree; do not commit these files", file=sys.stderr)
     utts = result.utterances
+    chunks = chunk([render(u, args.zone) for u in utts], args.chunk_chars)
     try:
-        paths = _write_chunks(args.out, chunk([render(u, args.zone) for u in utts], args.chunk_chars))
+        _write_chunks(args.out, chunks)
     except OSError as e:
         print(f"cannot write to {args.out}: {e}", file=sys.stderr)
         return 2
@@ -94,7 +96,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"period: {format_ts(utts[0].ts, args.zone)} .. {format_ts(utts[-1].ts, args.zone)}")
     print(f"excluded: {result.excluded} injected texts, {result.excluded_sessions} non-interactive sessions, "
           f"{result.skipped} unreadable records")
-    print(f"files: {len(paths)} in {args.out}")
+    print(f"files: {len(chunks)} in {args.out}")
     print("note: Claude Code deletes transcripts older than cleanupPeriodDays (default 30 days).")
     return 0
 

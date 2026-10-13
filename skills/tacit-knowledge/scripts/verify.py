@@ -14,21 +14,22 @@ import argparse
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from history import SOURCES, Utterance, load_or_report, parse_sources, session_prefix
+from history import SOURCES, Utterance, load_or_report, minute_key, parse_sources, session_prefix
 
 EVIDENCE = re.compile(
     r"^\s*> (\d{4}-\d{2}-\d{2} \d{2}:\d{2}[+-]\d{2}:\d{2}) ([0-9a-f]{8}-[0-9a-f]{3})「(.+)」\s*$"
 )
 CLAIM = re.compile(r"^- \S")
 
-Key = Tuple[datetime, str]
+Key = Tuple[int, str]
 Finding = Tuple[int, str]
 
 
-def parse_evidence(line: str) -> Optional[Tuple[datetime, str, str]]:
+def parse_evidence(line: str) -> Optional[Tuple[int, str, str]]:
     m = EVIDENCE.match(line)
     if not m:
         return None
@@ -36,13 +37,13 @@ def parse_evidence(line: str) -> Optional[Tuple[datetime, str, str]]:
         local = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M%z")
     except ValueError:
         return None
-    return local.astimezone(timezone.utc), m.group(2), m.group(3)
+    return minute_key(local), m.group(2), m.group(3)
 
 
 def build_index(utterances: Sequence[Utterance]) -> Dict[Key, List[str]]:
     index: Dict[Key, List[str]] = {}
     for u in utterances:
-        key = (u.ts.replace(second=0, microsecond=0), session_prefix(u.session))
+        key = (minute_key(u.ts), session_prefix(u.session))
         index.setdefault(key, []).append(u.text)
     return index
 
@@ -55,7 +56,7 @@ def verify(lines: Sequence[str], index: Dict[Key, List[str]]) -> Tuple[List[Find
     for no, raw in enumerate(lines, 1):
         line = raw.rstrip()
         if CLAIM.match(line):
-            if claim:
+            if claim is not None:
                 unsupported.append(claim)
             claim = (no, line)
             continue
@@ -66,7 +67,7 @@ def verify(lines: Sequence[str], index: Dict[Key, List[str]]) -> Tuple[List[Find
         ts, session, quote = evidence
         if not any(quote in text for text in index.get((ts, session), [])):
             bad.append((no, line))
-    if claim:
+    if claim is not None:
         unsupported.append(claim)
     return bad, unsupported
 
@@ -89,15 +90,14 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
     try:
-        with open(args.doc, encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError as e:
+        lines = Path(args.doc).read_bytes().decode().splitlines()
+    except (OSError, UnicodeDecodeError) as e:
         print(f"cannot read {args.doc}: {e}", file=sys.stderr)
         return 2
     result = load_or_report(args.project, args.sources, args.include_non_interactive)
     if result is None:
         return 2
-    total = sum(1 for line in lines if parse_evidence(line.rstrip()))
+    total = sum(1 for line in lines if parse_evidence(line))
     if total == 0:
         print("no evidence lines found; check the line format in the docstring of verify.py")
         return 1

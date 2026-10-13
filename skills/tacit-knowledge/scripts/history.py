@@ -6,7 +6,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Iterator, List, Optional, Sequence, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -33,6 +33,7 @@ SOURCES = ("claude", "codex")
 EXCLUDED = "excluded"
 NON_INTERACTIVE = "non-interactive"
 BROKEN = "broken"
+OTHER_PROJECT = "other-project"
 
 
 @dataclass(frozen=True)
@@ -91,7 +92,13 @@ def format_ts(ts: datetime, tz: Optional[tzinfo]) -> str:
 
 
 def parse_ts(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    # Python 3.9 and 3.10 cannot parse a trailing "Z"
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def minute_key(ts: datetime) -> int:
+    """Whole minutes since the epoch, so the same instant matches whatever offset it was written in."""
+    return int(ts.timestamp()) // 60
 
 
 def _real(path: str) -> str:
@@ -103,14 +110,14 @@ def is_under(child: str, parent: str) -> bool:
 
 
 def _read_jsonl(path: Path) -> Iterator[Optional[dict]]:
-    with open(path, encoding="utf-8", errors="replace") as f:
+    """Yield each record, or None for a line that is not a JSON object in UTF-8."""
+    with open(path, "rb") as f:
         for line in f:
-            line = line.strip()
-            if not line:
+            if not line.strip():
                 continue
             try:
                 rec = json.loads(line)
-            except json.JSONDecodeError:
+            except ValueError:
                 yield None
                 continue
             yield rec if isinstance(rec, dict) else None
@@ -140,34 +147,35 @@ def _claude_text(content: object) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "\n".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text")
+        return "\n".join(c["text"] for c in content
+                         if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str))
     return ""
 
 
-def _claude_outcome(rec: dict) -> Union[Utterance, str, None]:
+def _claude_outcome(rec: dict, session: str) -> Union[Utterance, str, None]:
     if rec.get("type") != "user" or rec.get("isMeta") or rec.get("isSidechain"):
         return None
     text = _claude_text((rec.get("message") or {}).get("content"))
-    return _utterance("claude", str(rec.get("sessionId", "")), rec.get("timestamp"), text, CLAUDE_INJECTED)
+    return _utterance("claude", session, rec.get("timestamp"), text, CLAUDE_INJECTED)
 
 
 def _load_claude_file(path: Path, project: str, result: LoadResult, include_non_interactive: bool) -> None:
     found: List[Utterance] = []
     pending = LoadResult()
     cwd_matches: Optional[bool] = None
-    interactive = True
+    entrypoints = set()
     for rec in _read_jsonl(path):
         if rec is None:
             result.skipped += 1
             continue
         if cwd_matches is None and rec.get("cwd"):
             cwd_matches = is_under(_real(str(rec["cwd"])), project)
-        if str(rec.get("entrypoint", "")).startswith("sdk"):
-            interactive = False
-        _tally(pending, _claude_outcome(rec), found)
+        entrypoints.add(str(rec.get("entrypoint")))
+        # Claude Code names each transcript after its session ID
+        _tally(pending, _claude_outcome(rec, path.stem), found)
     if cwd_matches is False:
         return
-    if not interactive and not include_non_interactive:
+    if any(e.startswith("sdk") for e in entrypoints) and not include_non_interactive:
         result.excluded_sessions += 1
         return
     result.excluded += pending.excluded
@@ -175,7 +183,7 @@ def _load_claude_file(path: Path, project: str, result: LoadResult, include_non_
     result.utterances.extend(found)
 
 
-def load_claude(project: str, home: Path, result: LoadResult, include_non_interactive: bool = False) -> None:
+def load_claude(project: str, home: Path, result: LoadResult, include_non_interactive: bool) -> None:
     real = _real(project)
     dirs = sorted({encode_project(os.path.abspath(os.path.expanduser(project))), encode_project(real)})
     for name in dirs:
@@ -189,29 +197,29 @@ def _codex_texts(rec: dict) -> List[str]:
     payload = rec.get("payload") or {}
     if rec.get("type") != "response_item" or payload.get("type") != "message" or payload.get("role") != "user":
         return []
-    return [c.get("text", "") for c in payload.get("content") or [] if isinstance(c, dict) and c.get("type") == "input_text"]
+    return [c["text"] for c in payload.get("content") or []
+            if isinstance(c, dict) and c.get("type") == "input_text" and isinstance(c.get("text"), str)]
 
 
-def _codex_session(meta: Optional[dict], project: str) -> tuple:
-    """Return (status, session id); status None means read the file, "other" means another project."""
+def _codex_status(meta: Optional[dict], project: str) -> Optional[str]:
+    """Return None when the file should be read, otherwise why it is not."""
     if not meta or meta.get("type") != "session_meta":
-        return BROKEN, ""
+        return BROKEN
     payload = meta.get("payload") or {}
-    cwd = payload.get("cwd")
-    if not cwd:
-        return BROKEN, ""
-    if not is_under(_real(str(cwd)), project):
-        return "other", ""
+    if not payload.get("cwd") or not payload.get("id"):
+        return BROKEN
+    if not is_under(_real(str(payload["cwd"])), project):
+        return OTHER_PROJECT
     source = payload.get("source")
-    session = str(payload.get("id", ""))
     if not isinstance(source, str) or source == "exec":
-        return NON_INTERACTIVE, session
-    return None, session
+        return NON_INTERACTIVE
+    return None
 
 
 def _load_codex_file(path: Path, project: str, result: LoadResult, include_non_interactive: bool) -> None:
     records = _read_jsonl(path)
-    status, session = _codex_session(next(records, None), project)
+    meta = next(records, None)
+    status = _codex_status(meta, project)
     if status == NON_INTERACTIVE and include_non_interactive:
         status = None
     if status == BROKEN:
@@ -220,6 +228,7 @@ def _load_codex_file(path: Path, project: str, result: LoadResult, include_non_i
         result.excluded_sessions += 1
     if status is not None:
         return
+    session = str(meta["payload"]["id"])
     for rec in records:
         if rec is None:
             result.skipped += 1
@@ -228,7 +237,7 @@ def _load_codex_file(path: Path, project: str, result: LoadResult, include_non_i
             _tally(result, _utterance("codex", session, rec.get("timestamp"), text, CODEX_INJECTED), result.utterances)
 
 
-def load_codex(project: str, home: Path, result: LoadResult, include_non_interactive: bool = False) -> None:
+def load_codex(project: str, home: Path, result: LoadResult, include_non_interactive: bool) -> None:
     root = home / "sessions"
     result.searched.append(str(root))
     real = _real(project)
@@ -240,7 +249,7 @@ def _dedup(utterances: Sequence[Utterance]) -> List[Utterance]:
     seen = set()
     out = []
     for u in utterances:
-        key = (u.session, u.ts.replace(second=0, microsecond=0), u.text)
+        key = (u.session, minute_key(u.ts), u.text)
         if key not in seen:
             seen.add(key)
             out.append(u)
@@ -258,7 +267,7 @@ def load(project: str, sources: Sequence[str] = SOURCES, claude_home: Optional[P
     return result
 
 
-def load_or_report(project: str, sources: Sequence[str], include_non_interactive: bool = False) -> Optional[LoadResult]:
+def load_or_report(project: str, sources: Sequence[str], include_non_interactive: bool) -> Optional[LoadResult]:
     """Load history, or print where it looked and return None when nothing was found."""
     result = load(project, sources, include_non_interactive=include_non_interactive)
     if result.utterances:

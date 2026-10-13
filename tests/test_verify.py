@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -20,9 +21,9 @@ def utterance(text, ts=datetime(2026, 9, 24, 1, 5, 30, tzinfo=timezone.utc), ses
 
 
 class ParseEvidenceTest(unittest.TestCase):
-    def test_parses_time_as_utc_minute_session_and_quote(self):
-        self.assertEqual(verify.parse_evidence(GOOD),
-                         (datetime(2026, 9, 24, 1, 5, tzinfo=timezone.utc), SID, "公式ドキュメントで確認してください"))
+    def test_parses_time_as_minute_key_session_and_quote(self):
+        minute = int(datetime(2026, 9, 24, 1, 5, tzinfo=timezone.utc).timestamp()) // 60
+        self.assertEqual(verify.parse_evidence(GOOD), (minute, SID, "公式ドキュメントで確認してください"))
 
     def test_keeps_inner_closing_bracket_in_quote(self):
         line = "  > 2026-09-24 10:05+09:00 45c391e1-2c4「「割れる」って直訳ですよね」"
@@ -66,6 +67,11 @@ class VerifyTest(unittest.TestCase):
     def test_reports_claims_without_evidence_including_last_one(self):
         text = f"- 根拠なし1\n- 根拠あり\n{GOOD}\n- 根拠なし2\n"
         self.assertEqual(self.run_verify(text)[1], [(1, "- 根拠なし1"), (4, "- 根拠なし2")])
+
+    def test_matches_utterance_with_fractional_seconds(self):
+        index = verify.build_index([utterance("小数秒", ts=datetime(2026, 9, 24, 1, 5, 30, 500000, tzinfo=timezone.utc))])
+        line = "  > 2026-09-24 10:05+09:00 45c391e1-2c4「小数秒」"
+        self.assertEqual(verify.verify([f"- 主張\n", line], index), ([], []))
 
     def test_accepts_evidence_after_blank_line(self):
         self.assertEqual(self.run_verify(f"- 主張\n\n{GOOD}\n"), ([], []))
@@ -121,7 +127,51 @@ class MainTest(unittest.TestCase):
         self.write_history()
         code, stdout, _ = self.run_main("# 見出しだけの文書\n")
         self.assertEqual(code, 1)
-        self.assertIn("no evidence lines", stdout)
+        self.assertEqual(stdout, "no evidence lines found; check the line format in the docstring of verify.py\n")
+
+    def test_returns_1_when_only_evidence_fails(self):
+        self.write_history()
+        bad = "  > 2026-09-24 10:05+09:00 45c391e1-2c4「偽の引用」"
+        code, stdout, _ = self.run_main(f"- 主張\n{bad}\n")
+        self.assertEqual(code, 1)
+        self.assertIn("evidence: 1, verified: 0, claims without evidence: 0", stdout)
+
+    def test_returns_1_when_only_a_claim_lacks_evidence(self):
+        self.write_history()
+        code, _, _ = self.run_main(f"- 主張\n{GOOD}\n- 根拠なし\n")
+        self.assertEqual(code, 1)
+
+    def test_returns_2_when_document_is_not_utf8(self):
+        self.write_history()
+        self.doc.write_bytes(b"- \xff\xfe\n")
+        stderr = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+            code = verify.main([str(self.doc), "--project", "/proj"])
+        self.assertEqual(code, 2)
+        self.assertIn(f"cannot read {self.doc}", stderr.getvalue())
+
+    def test_help_describes_every_option(self):
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, redirect_stdout(stdout):
+            verify.main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+        text = " ".join(stdout.getvalue().split())
+        for phrase in ("Verify evidence lines against agent history.", "tacit-knowledge document to check",
+                       "project directory (default: current directory)", "comma-separated: claude,codex",
+                       "also read claude -p, codex exec, and subagent sessions (usually written by another agent)"):
+            self.assertRegex(text, rf"(^| ){re.escape(phrase)}( |$)")
+
+    def test_uses_current_directory_as_default_project(self):
+        project = self.root / "project"
+        project.mkdir()
+        real = os.path.realpath(project)
+        fx.write_claude(self.claude, real, [fx.claude_user("公式ドキュメントで確認してください", cwd=real)])
+        self.doc.write_text(f"- 主張\n{GOOD}\n", encoding="utf-8")
+        cwd = os.getcwd()
+        os.chdir(project)
+        self.addCleanup(os.chdir, cwd)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(verify.main([str(self.doc)]), 0)
 
     def test_returns_2_when_history_is_missing(self):
         code, _, stderr = self.run_main(f"- 主張\n{GOOD}\n")
@@ -137,9 +187,11 @@ class MainTest(unittest.TestCase):
         self.assertIn("missing.md", stderr.getvalue())
 
     def test_rejects_unknown_source(self):
-        with self.assertRaises(SystemExit) as cm, redirect_stderr(io.StringIO()):
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(stderr):
             verify.main([str(self.doc), "--source", "cursor"])
         self.assertEqual(cm.exception.code, 2)
+        self.assertIn("error: source must be a subset of claude,codex\n", stderr.getvalue())
 
 
 if __name__ == "__main__":

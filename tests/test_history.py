@@ -1,6 +1,9 @@
+import io
+import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -40,6 +43,56 @@ class ClaudeTest(HistoryTestCase):
         content = [{"type": "text", "text": "一行目"}, {"type": "image"}, {"type": "text", "text": "二行目"}]
         fx.write_claude(self.claude, PROJECT, [fx.claude_user(content)])
         self.assertEqual(self.texts(self.load()), ["一行目\n二行目"])
+
+    def test_uses_file_name_as_session_id(self):
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user("本文", session="not-the-file-name")])
+        self.assertEqual(self.load().utterances[0].session, fx.CLAUDE_SESSION)
+
+    def test_ignores_text_items_without_text(self):
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user([{"type": "text"}, {"type": "text", "text": "本文"}])])
+        self.assertEqual(self.texts(self.load()), ["本文"])
+
+    def test_ignores_message_without_content(self):
+        rec = fx.claude_user("x")
+        rec["message"] = {"role": "user"}
+        fx.write_claude(self.claude, PROJECT, [rec])
+        result = self.load()
+        self.assertEqual((result.utterances, result.excluded, result.skipped), ([], 0, 0))
+
+    def test_decides_project_by_first_record_with_cwd(self):
+        fx.write_claude(self.claude, PROJECT, [
+            {"type": "summary", "summary": "no cwd here"},
+            fx.claude_user("最初", cwd="/proj"),
+            fx.claude_user("移動後", cwd="/other", ts="2026-09-24T02:00:00Z"),
+        ])
+        self.assertEqual(self.texts(self.load()), ["最初", "移動後"])
+
+    def test_counts_each_non_interactive_session(self):
+        for i in range(2):
+            fx.write_claude(self.claude, PROJECT, [fx.claude_user("ok", entrypoint="sdk-cli")], session=f"s{i}")
+        self.assertEqual(self.load().excluded_sessions, 2)
+
+    def test_sums_injected_texts_across_sessions(self):
+        for i in range(2):
+            fx.write_claude(self.claude, PROJECT, [fx.claude_user("<system-reminder>x</system-reminder>")], session=f"s{i}")
+        self.assertEqual(self.load().excluded, 2)
+
+    def test_counts_each_bad_timestamp(self):
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user("a", ts="x"), fx.claude_user("b", ts="y")])
+        self.assertEqual(self.load().skipped, 2)
+
+    def test_counts_undecodable_line_as_skipped(self):
+        path = fx.write_claude(self.claude, PROJECT, [fx.claude_user("読める")])
+        with open(path, "ab") as f:
+            f.write(b"\xff\xfe broken\n")
+        result = self.load()
+        self.assertEqual(self.texts(result), ["読める"])
+        self.assertEqual(result.skipped, 1)
+
+    def test_reads_records_after_blank_line(self):
+        later = json.dumps(fx.claude_user("後", ts="2026-09-24T03:00:00Z"), ensure_ascii=False)
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user("前")], raw_lines=["", later])
+        self.assertEqual(self.texts(self.load()), ["前", "後"])
 
     def test_ignores_tool_result_only_content(self):
         content = [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]
@@ -130,6 +183,46 @@ class CodexTest(HistoryTestCase):
         self.assertEqual(result.utterances[0].tool, "codex")
         self.assertEqual(result.utterances[0].session, fx.CODEX_SESSION)
 
+    def test_ignores_developer_messages_and_non_response_records(self):
+        developer = fx.codex_user("developer の指示")
+        developer["payload"]["role"] = "developer"
+        event = fx.codex_user("event の記録")
+        event["type"] = "event_msg"
+        fx.write_codex(self.codex, [fx.codex_meta(), developer, event, fx.codex_user("人の発話")])
+        self.assertEqual(self.texts(self.load()), ["人の発話"])
+
+    def test_reads_only_input_text_items(self):
+        rec = fx.codex_user("本文")
+        rec["payload"]["content"].append({"type": "input_image", "text": "代替テキスト"})
+        rec["payload"]["content"].append({"type": "input_text"})
+        fx.write_codex(self.codex, [fx.codex_meta(), rec])
+        result = self.load()
+        self.assertEqual(self.texts(result), ["本文"])
+        self.assertEqual(result.skipped, 0)
+
+    def test_counts_empty_file_as_skipped(self):
+        fx.write_codex(self.codex, [])
+        self.assertEqual(self.load().skipped, 1)
+
+    def test_counts_session_meta_without_id_as_skipped(self):
+        meta = fx.codex_meta()
+        del meta["payload"]["id"]
+        fx.write_codex(self.codex, [meta, fx.codex_user("idなし")])
+        result = self.load()
+        self.assertEqual((result.utterances, result.skipped), ([], 1))
+
+    def test_counts_each_broken_file(self):
+        for i in range(2):
+            fx.write_codex(self.codex, [fx.codex_user("metaなし")], session=f"s{i}")
+        self.assertEqual(self.load().skipped, 2)
+
+    def test_keeps_reading_after_broken_line(self):
+        later = json.dumps(fx.codex_user("後", ts="2026-09-24T03:00:00Z"), ensure_ascii=False)
+        fx.write_codex(self.codex, [fx.codex_meta(), fx.codex_user("前")], raw_lines=["{", later])
+        result = self.load()
+        self.assertEqual(self.texts(result), ["前", "後"])
+        self.assertEqual(result.skipped, 1)
+
     def test_skips_session_of_other_project(self):
         fx.write_codex(self.codex, [fx.codex_meta(cwd="/other"), fx.codex_user("別")])
         self.assertEqual(self.load().utterances, [])
@@ -188,6 +281,21 @@ class CommonTest(HistoryTestCase):
         ])
         self.assertEqual(self.texts(self.load()), ["同じ", "同じ"])
 
+    def test_merges_duplicates_with_fractional_seconds(self):
+        fx.write_claude(self.claude, PROJECT, [
+            fx.claude_user("同じ", ts="2026-09-24T01:05:01.250Z"),
+            fx.claude_user("同じ", ts="2026-09-24T01:05:59.750Z"),
+        ])
+        self.assertEqual(self.texts(self.load()), ["同じ"])
+
+    def test_load_or_report_reads_only_requested_sources_and_reports_paths(self):
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user("claude だけ")])
+        stderr = io.StringIO()
+        env = {"CLAUDE_CONFIG_DIR": str(self.claude), "CODEX_HOME": str(self.codex)}
+        with mock.patch.dict(os.environ, env), redirect_stderr(stderr):
+            self.assertIsNone(history.load_or_report(PROJECT, ("codex",), False))
+        self.assertEqual(stderr.getvalue(), f"no utterances found. searched:\n  {self.codex / 'sessions'}\n")
+
     def test_sorts_utterances_by_time_across_tools(self):
         fx.write_claude(self.claude, PROJECT, [fx.claude_user("二番目", ts="2026-09-24T02:00:00Z")])
         fx.write_codex(self.codex, [fx.codex_meta(), fx.codex_user("一番目", ts="2026-09-24T01:00:00Z"),
@@ -243,8 +351,19 @@ class FormatTest(unittest.TestCase):
 
     def test_parse_sources_rejects_unknown_or_empty(self):
         for value in ("cursor", "claude,cursor", "", " , "):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "^source must be a subset of claude,codex$"):
                 history.parse_sources(value)
+
+    def test_minute_key_counts_whole_minutes_since_epoch(self):
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        self.assertEqual(history.minute_key(epoch + timedelta(seconds=59.9)), 0)
+        self.assertEqual(history.minute_key(epoch + timedelta(minutes=1)), 1)
+        self.assertEqual(history.minute_key(datetime(1970, 1, 1, 9, 1, tzinfo=timezone(timedelta(hours=9)))), 1)
+
+    def test_is_under_handles_root_and_sibling_prefix(self):
+        self.assertTrue(history.is_under("/proj", "/"))
+        self.assertTrue(history.is_under("/proj/sub", "/proj/"))
+        self.assertFalse(history.is_under("/projX", "/proj"))
 
     def test_session_prefix_keeps_first_twelve_characters(self):
         self.assertEqual(history.session_prefix(fx.CLAUDE_SESSION), "45c391e1-2c4")
@@ -269,7 +388,7 @@ class FormatTest(unittest.TestCase):
 
     def test_resolve_tz_rejects_unknown_and_malformed_names(self):
         for name in ("Not/AZone", "../etc"):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, f"^unknown time zone: {name}$"):
                 history.resolve_tz(name)
 
 
