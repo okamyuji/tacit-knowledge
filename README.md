@@ -39,12 +39,12 @@ The plugin contains this one skill and no hooks.
 
 ### Codex
 
-Codex loads user skills from `~/.codex/skills/<name>/SKILL.md` ([Codex skills](https://developers.openai.com/blog/eval-skills)). If you set `CODEX_HOME`, use that directory instead of `~/.codex`.
+Codex loads user skills from `~/.agents/skills/<name>/SKILL.md` ([Codex skills](https://developers.openai.com/codex/skills)).
 
 ```sh
 git clone https://github.com/okamyuji/tacit-knowledge.git
-mkdir -p ~/.codex/skills
-cp -R tacit-knowledge/skills/tacit-knowledge ~/.codex/skills/
+mkdir -p ~/.agents/skills
+cp -R tacit-knowledge/skills/tacit-knowledge ~/.agents/skills/
 ```
 
 ## Usage
@@ -64,13 +64,13 @@ python3 skills/tacit-knowledge/scripts/verify.py ~/notes/tacit/tacit-knowledge.m
 
 | Option | Meaning |
 |---|---|
-| `--project PATH` | Project directory. Defaults to the current directory. |
+| `--project PATH` | Project directory. Defaults to the current directory. Sessions started in its subdirectories are included, so your home directory covers every project. |
 | `--source claude,codex` | Which history to read. Defaults to both. |
 | `--tz ZONE` | IANA time zone for the headers, such as `Asia/Tokyo`. Defaults to the local zone. |
 | `--chunk-chars N` | Maximum characters per output file of `extract.py`. Defaults to 20000. |
 | `--include-non-interactive` | Also read non-interactive sessions (see below). Pass it to both scripts. |
 
-Exit codes are 0 for success, 1 when `verify.py` finds a failing line, and 2 when no history is found or an argument is wrong.
+Exit codes are 0 for success, 1 when `verify.py` finds an evidence line that is missing from the history or malformed, a claim without evidence, or no evidence lines at all, and 2 when no history is found, an input cannot be read, or an argument is wrong.
 
 ## What is left out
 

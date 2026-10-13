@@ -27,11 +27,11 @@ Under each heading, every item is one top-level `- ` bullet with a one-sentence 
   > 2026-04-18 09:45+00:00 b81d0e57-2ac「run the benchmark on this machine before we switch」
 ```
 
-Copy the time and the session prefix from the `===` header of the utterance in the prompt files, and copy the quote as an exact substring of that utterance on one line. `verify.py` treats every top-level `- ` bullet as a claim, so put notes in paragraphs, not bullets.
+Copy the time and the session prefix from the `===` header of the utterance in the prompt files, and copy the quote as an exact substring of that utterance on one line. `verify.py` treats every top-level `- ` bullet as a claim and every `>` line as evidence, so put notes in plain paragraphs, never in bullets or quotes.
 
 ## Procedure
 
-1. Confirm two things with the user: the project directory (default: the current directory) and an output directory. The output contains the user's raw prompts, which may include secrets, so it must stay outside any repository and must not be committed or shared.
+1. Confirm two things with the user: the project directory (default: the current directory; sessions started in its subdirectories are included, so the home directory means every project) and an output directory. The output contains the user's raw prompts, which may include secrets, so it must stay outside any repository and must not be committed or shared.
 2. Run the extractor and show the user its summary lines:
 
    ```sh
@@ -57,6 +57,7 @@ Copy the time and the session prefix from the `===` header of the utterance in t
 - A question stays a question. "Shouldn't we fix it upstream?" becomes "Asks whether the fix belongs upstream", not "Fixes problems upstream".
 - A request is not an outcome. Write "Asked to revert the change" unless the user's own words report the result.
 - Add nothing the quotes do not say. When unsure, leave the item out.
+- Quote the clause that carries the point, not a word or two. A short quote matches almost any utterance and proves nothing.
 - An item under "Recurring judgment criteria" needs evidence from at least two different sessions. Items in the other sections need at least one evidence line.
 
 ## What the extractor leaves out

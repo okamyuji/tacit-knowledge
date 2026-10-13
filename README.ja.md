@@ -39,12 +39,12 @@ claude plugin install tacit-knowledge@tacit-knowledge
 
 ### Codex
 
-Codexは、ユーザー単位のスキルを `~/.codex/skills/<名前>/SKILL.md` から読み込みます（[Codexのスキル](https://developers.openai.com/blog/eval-skills)）。`CODEX_HOME` を設定している場合は、`~/.codex` の代わりにそのディレクトリを使ってください。
+Codexは、ユーザー単位のスキルを `~/.agents/skills/<名前>/SKILL.md` から読み込みます（[Codexのスキル](https://developers.openai.com/codex/skills)）。
 
 ```sh
 git clone https://github.com/okamyuji/tacit-knowledge.git
-mkdir -p ~/.codex/skills
-cp -R tacit-knowledge/skills/tacit-knowledge ~/.codex/skills/
+mkdir -p ~/.agents/skills
+cp -R tacit-knowledge/skills/tacit-knowledge ~/.agents/skills/
 ```
 
 ## 使い方
@@ -64,13 +64,13 @@ python3 skills/tacit-knowledge/scripts/verify.py ~/notes/tacit/tacit-knowledge.m
 
 | オプション | 意味 |
 |---|---|
-| `--project PATH` | 対象のプロジェクトのディレクトリです。既定値はカレントディレクトリです。 |
+| `--project PATH` | 対象のプロジェクトのディレクトリです。既定値はカレントディレクトリです。配下のディレクトリで起動したsessionも含むので、ホームディレクトリを指定すると全プロジェクトが対象になります。 |
 | `--source claude,codex` | 読む履歴の種類です。既定では両方を読みます。 |
 | `--tz ZONE` | 見出しに使うIANAのタイムゾーンです（例 `Asia/Tokyo`）。既定値は実行環境のタイムゾーンです。 |
 | `--chunk-chars N` | `extract.py` が書く1ファイルあたりの最大文字数です。既定値は20000です。 |
 | `--include-non-interactive` | 非対話のsessionも読みます（次の節を参照）。両方のスクリプトに付けてください。 |
 
-終了コードは、成功で0、`verify.py` が照合に失敗した行を見つけたときに1、履歴が見つからないときや引数が誤っているときに2を返します。
+終了コードは、成功したときが0です。`verify.py` が、履歴にない根拠行、形式の崩れた根拠行、根拠のない項目を見つけたときや、根拠行が1つもないときは1を返します。履歴が見つからない、入力を読めない、引数が誤っている、のいずれかに当たるときは2になります。
 
 ## 対象外のもの
 
