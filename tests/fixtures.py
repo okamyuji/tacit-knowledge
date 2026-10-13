@@ -1,4 +1,4 @@
-"""テスト用の合成履歴を一時ディレクトリに書く。実データは使わない。"""
+"""Write synthetic history into temporary directories. No real history is used."""
 import json
 import re
 import sys

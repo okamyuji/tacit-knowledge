@@ -76,6 +76,8 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument("doc", help="tacit-knowledge document to check")
     parser.add_argument("--project", default=os.getcwd(), help="project directory (default: current directory)")
     parser.add_argument("--source", default=",".join(SOURCES), help="comma-separated: claude,codex")
+    parser.add_argument("--include-non-interactive", action="store_true",
+                        help="also read claude -p, codex exec, and subagent sessions (usually written by another agent)")
     args = parser.parse_args(argv)
     try:
         args.sources = parse_sources(args.source)
@@ -92,7 +94,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except OSError as e:
         print(f"cannot read {args.doc}: {e}", file=sys.stderr)
         return 2
-    result = load_or_report(args.project, args.sources)
+    result = load_or_report(args.project, args.sources, args.include_non_interactive)
     if result is None:
         return 2
     total = sum(1 for line in lines if parse_evidence(line.rstrip()))

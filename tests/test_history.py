@@ -81,6 +81,13 @@ class ClaudeTest(HistoryTestCase):
         self.assertEqual(result.utterances, [])
         self.assertEqual(result.excluded_sessions, 1)
 
+    def test_includes_sdk_session_when_asked(self):
+        fx.write_claude(self.claude, PROJECT, [fx.claude_user("手で打った claude -p", entrypoint="sdk-cli")])
+        result = history.load(PROJECT, ("claude",), claude_home=self.claude, codex_home=self.codex,
+                              include_non_interactive=True)
+        self.assertEqual(self.texts(result), ["手で打った claude -p"])
+        self.assertEqual(result.excluded_sessions, 0)
+
     def test_keeps_records_without_entrypoint(self):
         rec = fx.claude_user("古い版の記録")
         del rec["entrypoint"]
@@ -88,7 +95,7 @@ class ClaudeTest(HistoryTestCase):
         self.assertEqual(self.texts(self.load()), ["古い版の記録"])
 
     def test_skips_session_whose_cwd_is_another_path_with_same_encoding(self):
-        # /a/b_c と /a/b-c は同じディレクトリ名に変換される
+        # /a/b_c and /a/b-c map to the same directory name
         fx.write_claude(self.claude, "/a/b-c", [fx.claude_user("別プロジェクト", cwd="/a/b_c")])
         self.assertEqual(self.load(project="/a/b-c").utterances, [])
 
@@ -133,6 +140,16 @@ class CodexTest(HistoryTestCase):
         result = self.load()
         self.assertEqual(result.utterances, [])
         self.assertEqual(result.excluded_sessions, 2)
+
+    def test_includes_exec_and_subagent_sessions_when_asked(self):
+        fx.write_codex(self.codex, [fx.codex_meta(source="exec", session="a" * 36), fx.codex_user("手で打った exec")],
+                       session="a" * 36)
+        fx.write_codex(self.codex, [fx.codex_meta(source={"subagent": {}}, session="b" * 36), fx.codex_user("sub")],
+                       session="b" * 36)
+        result = history.load(PROJECT, ("codex",), claude_home=self.claude, codex_home=self.codex,
+                              include_non_interactive=True)
+        self.assertEqual(sorted(self.texts(result)), ["sub", "手で打った exec"])
+        self.assertEqual({u.session for u in result.utterances}, {"a" * 36, "b" * 36})
 
     def test_excludes_injected_codex_texts(self):
         injected = ["<environment_context>\n  <cwd>/proj</cwd>", "# AGENTS.md instructions\n\n<INSTRUCTIONS>", "<recommended_plugins>\nHere"]

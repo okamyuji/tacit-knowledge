@@ -44,6 +44,8 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument("--out", required=True, type=Path, help="output directory (do not commit it)")
     parser.add_argument("--project", default=os.getcwd(), help="project directory (default: current directory)")
     parser.add_argument("--source", default=",".join(SOURCES), help="comma-separated: claude,codex")
+    parser.add_argument("--include-non-interactive", action="store_true",
+                        help="also read claude -p, codex exec, and subagent sessions (usually written by another agent)")
     parser.add_argument("--tz", default=None, help="IANA time zone such as Asia/Tokyo (default: local)")
     parser.add_argument("--chunk-chars", type=int, default=DEFAULT_CHUNK_CHARS, help="max characters per file")
     args = parser.parse_args(argv)
@@ -58,7 +60,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 
 def _write_chunks(out: Path, chunks: List[List[str]]) -> List[Path]:
-    # 既存ディレクトリの権限は利用者のものなので変えない。中身のファイルは常に 0600 で書く
+    # An existing directory belongs to the user, so leave its mode alone; the files are always 0600.
     if not out.is_dir():
         out.mkdir(mode=0o700, parents=True)
         out.chmod(0o700)
@@ -76,7 +78,7 @@ def _write_chunks(out: Path, chunks: List[List[str]]) -> List[Path]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
-    result = load_or_report(args.project, args.sources)
+    result = load_or_report(args.project, args.sources, args.include_non_interactive)
     if result is None:
         return 2
     if in_git_worktree(args.out.resolve()):

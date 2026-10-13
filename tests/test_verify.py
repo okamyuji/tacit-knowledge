@@ -109,6 +109,14 @@ class MainTest(unittest.TestCase):
         self.assertIn("NG evidence not found in history (line 2)", stdout)
         self.assertIn("NG claim without evidence (line 3)", stdout)
 
+    def test_verifies_quotes_from_non_interactive_sessions_only_when_asked(self):
+        fx.write_codex(self.codex, [fx.codex_meta(source="exec"), fx.codex_user("手で打った exec の指示")])
+        line = "  > 2026-09-24 10:05+09:00 01a12ca3-2e3「手で打った exec の指示」"
+        self.doc.write_text(f"- 主張\n{line}\n", encoding="utf-8")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(verify.main([str(self.doc), "--project", "/proj"]), 2)
+            self.assertEqual(verify.main([str(self.doc), "--project", "/proj", "--include-non-interactive"]), 0)
+
     def test_returns_1_when_document_has_no_evidence_lines(self):
         self.write_history()
         code, stdout, _ = self.run_main("# 見出しだけの文書\n")

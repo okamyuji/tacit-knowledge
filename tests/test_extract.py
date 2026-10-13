@@ -125,6 +125,12 @@ class MainTest(unittest.TestCase):
         self.assertIn("excluded: 1 injected texts, 1 non-interactive sessions, 0 unreadable records", stdout)
         self.assertIn("cleanupPeriodDays", stdout)
 
+    def test_includes_non_interactive_sessions_when_asked(self):
+        self.write_history()
+        _, stdout, _ = self.run_main("--include-non-interactive")
+        self.assertIn("agent", (self.out / "prompts-001.txt").read_text(encoding="utf-8"))
+        self.assertIn("0 non-interactive sessions", stdout)
+
     def test_warns_when_output_is_inside_git_worktree(self):
         self.write_history()
         (self.root / ".git").mkdir()

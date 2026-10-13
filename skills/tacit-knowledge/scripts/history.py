@@ -1,4 +1,4 @@
-"""Claude Code と Codex の履歴から、人が対話で書いた発話だけを取り出す。"""
+"""Read Claude Code and Codex history and keep only what a person typed in an interactive session."""
 from __future__ import annotations
 
 import json
@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterator, List, Optional, Sequence, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-# 人ではなくツールが user 発話として書き込む文の接頭辞
+# Prefixes of text that the tools, not the person, write into the user turn
 CLAUDE_INJECTED = (
     "<command-",
     "<local-command",
@@ -25,7 +25,7 @@ CLAUDE_INJECTED = (
 )
 CODEX_INJECTED = ("<environment_context>", "# AGENTS.md instructions", "<recommended_plugins>")
 
-# Codex の session ID は UUIDv7 で、先頭8文字は約65秒ごとにしか変わらない
+# Codex session IDs are UUIDv7, whose first 8 characters change only about every 65 seconds
 SESSION_PREFIX_LEN = 12
 
 SOURCES = ("claude", "codex")
@@ -147,13 +147,11 @@ def _claude_text(content: object) -> str:
 def _claude_outcome(rec: dict) -> Union[Utterance, str, None]:
     if rec.get("type") != "user" or rec.get("isMeta") or rec.get("isSidechain"):
         return None
-    if str(rec.get("entrypoint", "")).startswith("sdk"):
-        return NON_INTERACTIVE
     text = _claude_text((rec.get("message") or {}).get("content"))
     return _utterance("claude", str(rec.get("sessionId", "")), rec.get("timestamp"), text, CLAUDE_INJECTED)
 
 
-def _load_claude_file(path: Path, project: str, result: LoadResult) -> None:
+def _load_claude_file(path: Path, project: str, result: LoadResult, include_non_interactive: bool) -> None:
     found: List[Utterance] = []
     pending = LoadResult()
     cwd_matches: Optional[bool] = None
@@ -164,13 +162,12 @@ def _load_claude_file(path: Path, project: str, result: LoadResult) -> None:
             continue
         if cwd_matches is None and rec.get("cwd"):
             cwd_matches = is_under(_real(str(rec["cwd"])), project)
-        outcome = _claude_outcome(rec)
-        if outcome == NON_INTERACTIVE:
+        if str(rec.get("entrypoint", "")).startswith("sdk"):
             interactive = False
-        _tally(pending, outcome, found)
+        _tally(pending, _claude_outcome(rec), found)
     if cwd_matches is False:
         return
-    if not interactive:
+    if not interactive and not include_non_interactive:
         result.excluded_sessions += 1
         return
     result.excluded += pending.excluded
@@ -178,14 +175,14 @@ def _load_claude_file(path: Path, project: str, result: LoadResult) -> None:
     result.utterances.extend(found)
 
 
-def load_claude(project: str, home: Path, result: LoadResult) -> None:
+def load_claude(project: str, home: Path, result: LoadResult, include_non_interactive: bool = False) -> None:
     real = _real(project)
     dirs = sorted({encode_project(os.path.abspath(os.path.expanduser(project))), encode_project(real)})
     for name in dirs:
         directory = home / "projects" / name
         result.searched.append(str(directory))
         for path in sorted(directory.glob("*.jsonl")):
-            _load_claude_file(path, real, result)
+            _load_claude_file(path, real, result, include_non_interactive)
 
 
 def _codex_texts(rec: dict) -> List[str]:
@@ -196,7 +193,7 @@ def _codex_texts(rec: dict) -> List[str]:
 
 
 def _codex_session(meta: Optional[dict], project: str) -> tuple:
-    """(状態, session ID) を返す。状態は None（読む）、BROKEN、NON_INTERACTIVE、"other"（別プロジェクト）。"""
+    """Return (status, session id); status None means read the file, "other" means another project."""
     if not meta or meta.get("type") != "session_meta":
         return BROKEN, ""
     payload = meta.get("payload") or {}
@@ -206,14 +203,17 @@ def _codex_session(meta: Optional[dict], project: str) -> tuple:
     if not is_under(_real(str(cwd)), project):
         return "other", ""
     source = payload.get("source")
+    session = str(payload.get("id", ""))
     if not isinstance(source, str) or source == "exec":
-        return NON_INTERACTIVE, ""
-    return None, str(payload.get("id", ""))
+        return NON_INTERACTIVE, session
+    return None, session
 
 
-def _load_codex_file(path: Path, project: str, result: LoadResult) -> None:
+def _load_codex_file(path: Path, project: str, result: LoadResult, include_non_interactive: bool) -> None:
     records = _read_jsonl(path)
     status, session = _codex_session(next(records, None), project)
+    if status == NON_INTERACTIVE and include_non_interactive:
+        status = None
     if status == BROKEN:
         result.skipped += 1
     elif status == NON_INTERACTIVE:
@@ -228,12 +228,12 @@ def _load_codex_file(path: Path, project: str, result: LoadResult) -> None:
             _tally(result, _utterance("codex", session, rec.get("timestamp"), text, CODEX_INJECTED), result.utterances)
 
 
-def load_codex(project: str, home: Path, result: LoadResult) -> None:
+def load_codex(project: str, home: Path, result: LoadResult, include_non_interactive: bool = False) -> None:
     root = home / "sessions"
     result.searched.append(str(root))
     real = _real(project)
     for path in sorted(root.glob("**/*.jsonl")):
-        _load_codex_file(path, real, result)
+        _load_codex_file(path, real, result, include_non_interactive)
 
 
 def _dedup(utterances: Sequence[Utterance]) -> List[Utterance]:
@@ -247,20 +247,20 @@ def _dedup(utterances: Sequence[Utterance]) -> List[Utterance]:
     return out
 
 
-def load(project: str, sources: Sequence[str] = ("claude", "codex"),
-         claude_home: Optional[Path] = None, codex_home: Optional[Path] = None) -> LoadResult:
+def load(project: str, sources: Sequence[str] = SOURCES, claude_home: Optional[Path] = None,
+         codex_home: Optional[Path] = None, include_non_interactive: bool = False) -> LoadResult:
     result = LoadResult()
     if "claude" in sources:
-        load_claude(project, claude_home or default_claude_home(), result)
+        load_claude(project, claude_home or default_claude_home(), result, include_non_interactive)
     if "codex" in sources:
-        load_codex(project, codex_home or default_codex_home(), result)
+        load_codex(project, codex_home or default_codex_home(), result, include_non_interactive)
     result.utterances = _dedup(sorted(result.utterances, key=lambda u: (u.ts, u.tool, u.session)))
     return result
 
 
-def load_or_report(project: str, sources: Sequence[str]) -> Optional[LoadResult]:
+def load_or_report(project: str, sources: Sequence[str], include_non_interactive: bool = False) -> Optional[LoadResult]:
     """Load history, or print where it looked and return None when nothing was found."""
-    result = load(project, sources)
+    result = load(project, sources, include_non_interactive=include_non_interactive)
     if result.utterances:
         return result
     print("no utterances found. searched:", file=sys.stderr)

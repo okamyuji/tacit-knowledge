@@ -38,7 +38,7 @@ Copy the time and the session prefix from the `===` header of the utterance in t
    python3 <this skill>/scripts/extract.py --out <output dir> --project <project dir>
    ```
 
-   Options: `--source claude` or `--source codex` to read one tool, `--tz Asia/Tokyo` to change the time zone, `--chunk-chars N` to change the file size (default 20000). Exit code 2 means no history was found; show the searched paths it printed and ask the user for the right project directory.
+   Options: `--source claude` or `--source codex` to read one tool, `--tz Asia/Tokyo` to change the time zone, `--chunk-chars N` to change the file size (default 20000). Non-interactive sessions are skipped by default; if the user types prompts into `claude -p` or `codex exec` by hand, add `--include-non-interactive` here and in step 6. Exit code 2 means no history was found; show the searched paths it printed and ask the user for the right project directory.
 3. Read every `prompts-NNN.txt` completely, in order. For each file, write down candidate items with their evidence lines before moving on. Do not skim; a criterion often appears once per file.
 4. Merge the candidates into the four sections. Combine items that say the same thing and keep their evidence lines together.
 5. Write the document to `<output dir>/tacit-knowledge.md` unless the user named another path.
@@ -62,5 +62,5 @@ Copy the time and the session prefix from the `===` header of the utterance in t
 ## What the extractor leaves out
 
 - Text that the tools inject into the user turn, such as system reminders, command output, task notifications, and Codex environment context.
-- Non-interactive sessions: `claude -p` and SDK runs, `codex exec`, and subagents. Another agent usually wrote those prompts.
+- Non-interactive sessions: `claude -p` and SDK runs, `codex exec`, and subagents, unless `--include-non-interactive` is given. Another agent usually wrote those prompts.
 - History that Claude Code has already deleted. It keeps transcripts for `cleanupPeriodDays` days (30 by default), so older work is gone unless the user raised that setting.

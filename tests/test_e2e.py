@@ -1,4 +1,4 @@
-"""extract.py から verify.py までを、利用者と同じく CLI として通しで実行する。"""
+"""Run extract.py and verify.py as command-line tools, the way a user does."""
 import os
 import re
 import subprocess
