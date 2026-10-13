@@ -1,0 +1,10 @@
+.superpowers/
+docs/superpowers/
+.venv/
+__pycache__/
+*.pyc
+.coverage
+htmlcov/
+mutants/
+.pytest_cache/
+.DS_Store
