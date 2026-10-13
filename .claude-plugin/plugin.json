@@ -1,0 +1,15 @@
+{
+  "name": "tacit-knowledge",
+  "description": "Extract your judgment criteria, preferences, procedures, and past mistakes from Claude Code and Codex history, each backed by a verifiable dated quote.",
+  "author": {
+    "name": "okamyuji"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/okamyuji/tacit-knowledge",
+  "keywords": [
+    "tacit-knowledge",
+    "history",
+    "skills",
+    "codex"
+  ]
+}
