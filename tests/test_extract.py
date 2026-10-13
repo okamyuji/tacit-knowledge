@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import re
 import stat
@@ -203,11 +204,39 @@ class MainTest(unittest.TestCase):
         self.assertIn("agent", (self.out / "prompts-001.txt").read_text(encoding="utf-8"))
         self.assertIn("0 non-interactive sessions", stdout)
 
-    def test_warns_when_output_is_inside_git_worktree(self):
+    def test_refuses_output_inside_git_worktree(self):
         self.write_history()
         (self.root / ".git").mkdir()
-        _, _, stderr = self.run_main()
-        self.assertIn("git", stderr)
+        code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("inside a git worktree", stderr)
+        self.assertFalse(self.out.exists())
+
+    def test_refuses_existing_directory_writable_by_others(self):
+        self.write_history()
+        for mode in (0o777, 0o775):
+            self.out.mkdir(exist_ok=True)
+            self.out.chmod(mode)
+            code, _, stderr = self.run_main()
+            self.assertEqual(code, 2, oct(mode))
+            self.assertIn("writable by other users", stderr)
+            self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_does_not_follow_a_symlink_at_an_output_name(self):
+        self.out.mkdir()
+        victim = self.root / "victim.txt"
+        victim.write_text("keep", encoding="utf-8")
+        (self.out / "prompts-001.txt").symlink_to(victim)
+        with mock.patch.object(Path, "glob", return_value=iter([])), self.assertRaises(FileExistsError):
+            extract._write_chunks(self.out, [["本文"]])
+        self.assertEqual(victim.read_text(encoding="utf-8"), "keep")
+
+    def test_writes_utterance_with_a_lone_surrogate(self):
+        rec = fx.claude_user("bad \ud800 surrogate")
+        fx.write_claude(self.claude, "/proj", [], raw_lines=[json.dumps(rec)])
+        code, _, _ = self.run_main()
+        self.assertEqual(code, 0)
+        self.assertIn("bad \\ud800 surrogate", (self.out / "prompts-001.txt").read_text(encoding="utf-8"))
 
     def test_does_not_warn_outside_git_worktree(self):
         self.write_history()

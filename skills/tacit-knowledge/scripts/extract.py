@@ -66,22 +66,32 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     return args
 
 
+def _prepare_dir(out: Path) -> None:
+    # An existing directory belongs to the user, so leave its mode alone, but refuse one that others can write to:
+    # they could swap an output name for a symlink between our unlink and open.
+    if out.is_dir():
+        if out.stat().st_mode & 0o022:
+            raise OSError(f"{out} is writable by other users")
+        return
+    # mkdir(parents=True) ignores mode for the parents it creates, but honours the umask
+    previous = os.umask(0o077)
+    try:
+        out.mkdir(parents=True)
+    finally:
+        os.umask(previous)
+
+
 def _write_chunks(out: Path, chunks: List[List[str]]) -> None:
-    # An existing directory belongs to the user, so leave its mode alone; the files are always 0600.
-    if not out.is_dir():
-        # mkdir(parents=True) ignores mode for the parents it creates, but honours the umask
-        previous = os.umask(0o077)
-        try:
-            out.mkdir(parents=True)
-        finally:
-            os.umask(previous)
+    _prepare_dir(out)
     for stale in out.glob("prompts-*.txt"):
         if re.fullmatch(r"prompts-[0-9]{3,}\.txt", stale.name):
             stale.unlink()
     for i, blocks in enumerate(chunks, 1):
-        fd = os.open(out / f"prompts-{i:03d}.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # O_EXCL refuses an existing name, including a symlink, so the prompts never land in someone else's file
+        fd = os.open(out / f"prompts-{i:03d}.txt", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as f:
-            f.write("".join(blocks).encode())
+            # JSON allows lone surrogates, which UTF-8 cannot encode
+            f.write("".join(blocks).encode(errors="backslashreplace"))
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -90,7 +100,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if result is None:
         return 2
     if in_git_worktree(args.out.resolve()):
-        print(f"warning: {args.out} is inside a git worktree; do not commit these files", file=sys.stderr)
+        print(f"refusing to write raw prompts inside a git worktree: {args.out}", file=sys.stderr)
+        return 2
     utts = dedup(result.utterances)
     chunks = chunk([render(u, args.zone) for u in utts], args.chunk_chars)
     try:

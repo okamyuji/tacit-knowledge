@@ -68,6 +68,7 @@ python3 skills/tacit-knowledge/scripts/verify.py ~/notes/tacit/tacit-knowledge.m
 | `--source claude,codex` | Which history to read. Defaults to both. |
 | `--tz ZONE` | IANA time zone for the headers, such as `Asia/Tokyo`. Defaults to the local zone. |
 | `--chunk-chars N` | Maximum characters per output file of `extract.py`. Defaults to 20000. |
+| `--out DIR` | Output directory of `extract.py`. Existing `prompts-NNN.txt` files in it are replaced. |
 | `--include-non-interactive` | Also read non-interactive sessions (see below). Pass it to both scripts. |
 
 Exit codes are 0 for success, 1 when `verify.py` finds an evidence line that is missing from the history or malformed, a claim without evidence, or no evidence lines at all, and 2 when no history is found, an input cannot be read, the output cannot be written, or an argument is wrong.
@@ -84,7 +85,7 @@ Exit codes are 0 for success, 1 when `verify.py` finds an evidence line that is 
 
 ## Privacy
 
-The extracted files and the document contain your raw prompts, which may include secrets or customer data. The extractor writes files with mode `0600` and creates new output directories with mode `0700`. Keep the output outside any repository and do not share it.
+The extracted files and the document contain your raw prompts, which may include secrets or customer data. The extractor writes files with mode `0600`, creates new output directories with mode `0700`, and refuses a directory inside a git worktree or one that other users can write to. Keep the output and the document outside any repository and do not share them. The prompt files can contain text you once pasted, such as web pages or logs; the skill tells the agent to treat them as data, and you should keep your agent's permission prompts on while it runs.
 
 ## Development
 
