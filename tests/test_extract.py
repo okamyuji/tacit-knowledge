@@ -222,6 +222,15 @@ class MainTest(unittest.TestCase):
             self.assertIn("writable by other users", stderr)
             self.assertEqual(list(self.out.iterdir()), [])
 
+    def test_refuses_existing_directory_owned_by_another_user(self):
+        self.write_history()
+        self.out.mkdir(mode=0o755)
+        with mock.patch.object(extract.os, "getuid", return_value=os.getuid() + 1):
+            code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("owned by another user", stderr)
+        self.assertEqual(list(self.out.iterdir()), [])
+
     def test_does_not_follow_a_symlink_at_an_output_name(self):
         self.out.mkdir()
         victim = self.root / "victim.txt"

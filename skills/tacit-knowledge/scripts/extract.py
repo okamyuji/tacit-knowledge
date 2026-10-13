@@ -67,10 +67,14 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 
 def _prepare_dir(out: Path) -> None:
-    # An existing directory belongs to the user, so leave its mode alone, but refuse one that others can write to:
+    # Leave the mode of an existing directory alone, but refuse one that others own or can write to:
     # they could swap an output name for a symlink between our unlink and open.
     if out.is_dir():
-        if out.stat().st_mode & 0o022:
+        st = out.stat()
+        # Windows has no uid; there the mode check below is the only guard
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            raise OSError(f"{out} is owned by another user")
+        if st.st_mode & 0o022:
             raise OSError(f"{out} is writable by other users")
         return
     # mkdir(parents=True) ignores mode for the parents it creates, but honours the umask

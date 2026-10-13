@@ -352,13 +352,14 @@ class CodexTest(HistoryTestCase):
 
     def test_counts_user_message_whose_content_is_not_a_list_as_skipped(self):
         records = [fx.codex_meta()]
-        for content in (5, "plain", {"type": "input_text", "text": "x"}):
+        for content in (5, 0, "plain", "", {"type": "input_text", "text": "x"}, None):
             rec = fx.codex_user("")
             rec["payload"]["content"] = content
             records.append(rec)
         fx.write_codex(self.codex, records + [fx.codex_user("残る")])
         result = self.load()
-        self.assertEqual((self.texts(result), result.skipped), (["残る"], 3))
+        # None means a message without content, not a broken one
+        self.assertEqual((self.texts(result), result.skipped), (["残る"], 5))
 
     def test_skips_session_of_other_project(self):
         fx.write_codex(self.codex, [fx.codex_meta(cwd="/other"), fx.codex_user("別")])

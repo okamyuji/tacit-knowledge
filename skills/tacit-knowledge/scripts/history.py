@@ -244,7 +244,9 @@ def _codex_texts(rec: dict) -> Optional[List[str]]:
     payload = rec["payload"]
     if rec.get("type") != "response_item" or payload.get("type") != "message" or payload.get("role") != "user":
         return []
-    content = payload.get("content") or []
+    content = payload.get("content")
+    if content is None:
+        return []
     if not isinstance(content, list):
         return None
     return [c["text"] for c in content
