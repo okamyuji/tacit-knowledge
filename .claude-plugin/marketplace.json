@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "tacit-knowledge",
+  "description": "Extract tacit knowledge from your own Claude Code and Codex history.",
+  "owner": {
+    "name": "okamyuji"
+  },
+  "plugins": [
+    {
+      "name": "tacit-knowledge",
+      "description": "Extract tacit knowledge from Claude Code and Codex history with verifiable quotes.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
