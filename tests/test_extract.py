@@ -207,7 +207,9 @@ class MainTest(unittest.TestCase):
         self.out.mkdir()
         for mode in (0o755, 0o750, 0o701):
             self.out.chmod(mode)
-            code, _, stderr = self.run_main()
+            # a group of the user's own counts as the user; Linux runners have one, macOS's staff is shared
+            with mock.patch.object(extract, "_private_group", return_value=False):
+                code, _, stderr = self.run_main()
             self.assertEqual(code, 2, oct(mode))
             self.assertIn("is accessible to other users; run chmod 700 on it", stderr)
             self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), mode)
@@ -329,7 +331,9 @@ class MainTest(unittest.TestCase):
         for mode in (0o777, 0o775):
             self.out.mkdir(exist_ok=True)
             self.out.chmod(mode)
-            code, _, stderr = self.run_main()
+            # a group of the user's own counts as the user; Linux runners have one, macOS's staff is shared
+            with mock.patch.object(extract, "_private_group", return_value=False):
+                code, _, stderr = self.run_main()
             self.assertEqual(code, 2, oct(mode))
             self.assertIn("writable by other users", stderr)
             self.assertEqual(list(self.out.iterdir()), [])
