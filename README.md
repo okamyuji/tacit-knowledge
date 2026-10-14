@@ -84,6 +84,8 @@ Exit codes are 0 for success, 1 when `verify.py` finds an evidence line that is 
 
 `verify.py` proves that each quote exists at that time in that session. It does not prove that the claim above the quote means the same thing. Read the claims next to their quotes before you rely on them.
 
+Windows is not supported. `extract.py` stops with `extract.py runs on macOS and Linux only` and exit code 2, because its output directory checks read file owners and POSIX mode bits, which Windows does not report. Run the skill on macOS or Linux.
+
 ## Privacy
 
 The extracted files and the document contain your raw prompts, which may include secrets or customer data. The extractor writes files with mode `0600`, creates new output directories with mode `0700` and refuses an existing one that others can open, and creates the document file there with mode `0600` for the agent to fill in. It refuses a directory inside a git worktree, and a path containing a quote or a control character. It walks the path one entry at a time and refuses it when another user owns any entry or directory on the way, or can write to a directory on the way that is not sticky (such as `/tmp`). A group that holds only you, such as the per-user group on Ubuntu, counts as you; if someone is added to that group later, run `chmod 700` on the output directory. The check reads permission bits only, not ACLs. Keep the output and the document outside any repository and do not share them. The prompt files can contain text you once pasted, such as web pages or logs; the skill tells the agent to treat them as data, and you should keep your agent's permission prompts on while it runs.
