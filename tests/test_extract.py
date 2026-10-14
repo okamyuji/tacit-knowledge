@@ -107,27 +107,42 @@ class PrivateGroupTest(unittest.TestCase):
     ME = SimpleNamespace(pw_name="dev", pw_uid=os.getuid(), pw_gid=1001)
 
     def check(self, group, users=()):
-        with mock.patch("grp.getgrgid", return_value=group), mock.patch("pwd.getpwuid", return_value=self.ME), \
+        groups = group if isinstance(group, list) else [group]
+        with mock.patch("grp.getgrall", return_value=groups), mock.patch("pwd.getpwuid", return_value=self.ME), \
                 mock.patch("pwd.getpwall", return_value=[self.ME, *users]):
             return extract._private_group(1001)
 
     def test_accepts_group_named_after_the_user_with_no_other_member(self):
-        self.assertTrue(self.check(SimpleNamespace(gr_name="dev", gr_mem=[])))
-        self.assertTrue(self.check(SimpleNamespace(gr_name="dev", gr_mem=["dev"])))
+        self.assertTrue(self.check(SimpleNamespace(gr_name="dev", gr_gid=1001, gr_mem=[])))
+        self.assertTrue(self.check(SimpleNamespace(gr_name="dev", gr_gid=1001, gr_mem=["dev"])))
 
     def test_refuses_group_with_another_member(self):
-        self.assertFalse(self.check(SimpleNamespace(gr_name="dev", gr_mem=["dev", "eve"])))
+        self.assertFalse(self.check(SimpleNamespace(gr_name="dev", gr_gid=1001, gr_mem=["dev", "eve"])))
 
     def test_refuses_group_named_otherwise(self):
-        self.assertFalse(self.check(SimpleNamespace(gr_name="staff", gr_mem=[])))
+        self.assertFalse(self.check(SimpleNamespace(gr_name="staff", gr_gid=1001, gr_mem=[])))
 
     def test_refuses_group_that_is_another_users_primary_group(self):
         eve = SimpleNamespace(pw_name="eve", pw_uid=os.getuid() + 1, pw_gid=1001)
-        self.assertFalse(self.check(SimpleNamespace(gr_name="dev", gr_mem=[]), [eve]))
+        self.assertFalse(self.check(SimpleNamespace(gr_name="dev", gr_gid=1001, gr_mem=[]), [eve]))
 
     def test_refuses_unknown_group(self):
-        with mock.patch("grp.getgrgid", side_effect=KeyError(1001)):
+        self.assertFalse(self.check([SimpleNamespace(gr_name="dev", gr_gid=1002, gr_mem=[])]))
+
+    def test_refuses_when_the_user_has_no_passwd_entry(self):
+        with mock.patch("pwd.getpwuid", side_effect=KeyError(os.getuid())):
             self.assertFalse(extract._private_group(1001))
+
+    def test_refuses_gid_that_another_group_name_shares(self):
+        # groupadd -o lets root give one gid several names; the kernel grants by gid, not by name
+        self.assertFalse(self.check([SimpleNamespace(gr_name="dev", gr_gid=1001, gr_mem=[]),
+                                     SimpleNamespace(gr_name="shared", gr_gid=1001, gr_mem=["bob"])]))
+
+    def test_asks_about_the_group_of_the_entry(self):
+        st = os.stat_result((stat.S_IFDIR | 0o770, 0, 0, 0, 0, 1001, 0, 0, 0, 0))
+        with mock.patch.object(extract, "_private_group", return_value=True) as private:
+            self.assertEqual(extract._others_bits(st, 0o077), 0)
+        private.assert_called_once_with(1001)
 
     def test_looks_up_groups_only_when_group_bits_are_set(self):
         st = os.stat_result((stat.S_IFDIR | 0o705, 0, 0, 0, 0, 1001, 0, 0, 0, 0))
@@ -135,9 +150,6 @@ class PrivateGroupTest(unittest.TestCase):
             self.assertEqual(extract._others_bits(st, 0o077), 0o005)
         private.assert_not_called()
 
-    def test_refuses_on_a_platform_without_uids(self):
-        with mock.patch.object(extract, "os", SimpleNamespace(path=os.path)):
-            self.assertFalse(extract._private_group(1001))
 
 
 class MainTest(unittest.TestCase):
@@ -366,6 +378,14 @@ class MainTest(unittest.TestCase):
         self.assertFalse(self.out.exists())
         shared.chmod(0o1777)
         self.assertEqual(self.run_main()[0], 0)
+
+    def test_refuses_to_run_on_windows(self):
+        self.write_history()
+        with mock.patch.object(extract.sys, "platform", "win32"):
+            code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr, "extract.py runs on macOS and Linux only\n")
+        self.assertFalse(self.out.exists())
 
     def test_accepts_group_access_when_the_group_is_private(self):
         self.write_history()

@@ -73,21 +73,22 @@ UNSAFE_CHARS = re.compile(r"['\x00-\x1f\x7f]")
 
 
 def _owned_by_other(st: os.stat_result) -> bool:
-    # Windows has no uid; there only the mode checks run
-    return hasattr(os, "getuid") and st.st_uid not in (0, os.getuid())
+    return st.st_uid not in (0, os.getuid())
 
 
 def _private_group(gid: int) -> bool:
     """True for a group of the user's own, which Ubuntu and others pair with umask 002: its bits let no one else in."""
-    if not hasattr(os, "getuid"):
-        return False
+    # Imported here: Windows lacks both, and main() must get as far as saying it does not run there
     import grp
     import pwd
     try:
-        group, me = grp.getgrgid(gid), pwd.getpwuid(os.getuid())
+        me = pwd.getpwuid(os.getuid())
     except KeyError:
+        # A uid without a passwd entry, as in `docker run --user`, has no group of its own to vouch for
         return False
-    return (group.gr_name == me.pw_name and set(group.gr_mem) <= {me.pw_name}
+    # groupadd -o can give one gid several names, and the kernel grants by gid, so every name must be the user's own
+    groups = [g for g in grp.getgrall() if g.gr_gid == gid]
+    return (bool(groups) and all(g.gr_name == me.pw_name and set(g.gr_mem) <= {me.pw_name} for g in groups)
             # shortcut: getpwall() sees only enumerable users (local files; LDAP only with enumeration on), check the
             # group's members another way if a directory service hides users
             and not any(p.pw_gid == gid and p.pw_uid != me.pw_uid for p in pwd.getpwall()))
@@ -169,7 +170,7 @@ def _prepare_dir(existing: Path, missing: List[str]) -> Path:
     if walk(out) != out:
         raise OSError(f"{out} changed while it was being created")
     st = out.lstat()
-    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+    if st.st_uid != os.getuid():
         raise OSError(f"{out} is owned by another user")
     # The agent's editor may save through a temporary file, so others must not even list or read this directory
     if _others_bits(st, 0o077):
@@ -183,7 +184,7 @@ def _prepare_document(out: Path) -> Path:
         os.close(os.open(doc, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     except FileExistsError:
         st = doc.lstat()
-        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or (hasattr(os, "getuid") and st.st_uid != os.getuid()):
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.getuid():
             raise OSError(f"{doc} is not a regular file of yours with a single link") from None
         # Only the user can write to `out`, so the file checked above is the one changed here
         doc.chmod(0o600)
@@ -204,6 +205,10 @@ def _write_chunks(out: Path, chunks: List[List[str]]) -> None:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
+    if sys.platform == "win32":
+        # The checks below read POSIX owners and mode bits, which Windows does not report
+        print("extract.py runs on macOS and Linux only", file=sys.stderr)
+        return 2
     result = load_or_report(args.project, args.sources, args.include_non_interactive)
     if result is None:
         return 2
